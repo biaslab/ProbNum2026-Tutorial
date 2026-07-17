@@ -9,7 +9,7 @@ The series covers the five classic problem settings of [probabilistic-numerics.o
 | 1 | Probabilistic linear algebra | [`julia/01-probabilistic-linear-algebra.jl`](julia/01-probabilistic-linear-algebra.jl) | planned |
 | 2 | Bayesian quadrature | [`julia/02-bayesian-quadrature.jl`](julia/02-bayesian-quadrature.jl) | planned |
 | 3 | Probabilistic optimization | planned | planned |
-| 4 | Probabilistic ODE solvers | planned | planned |
+| 4 | Probabilistic ODE solvers | [`julia/04-probabilistic-ode-solvers.jl`](julia/04-probabilistic-ode-solvers.jl) | planned |
 | 5 | Probabilistic PDE solvers | planned | planned |
 
 ## Running the Pluto notebooks
