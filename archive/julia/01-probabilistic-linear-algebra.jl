@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.20.24
+# v1.0.3
 
 #> [frontmatter]
 #> title = "Probabilistic Linear Algebra — Solving Ax = b as Inference"
