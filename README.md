@@ -9,88 +9,120 @@ pattern of a linear system as a graphical model turns solving $Ax=b$ into margin
 Gaussian Markov random field, and the solver into **message passing between neighbouring unknowns** —
 local, asynchronous, communication-light, and with a per-node uncertainty as a by-product.
 
-The punchline of the first notebook: the Jacobi method *is* Gaussian belief propagation with the
-second moment deleted (verified to machine precision in the notebook). The classical iterative solver
-is not an alternative to the probabilistic one; it is the probabilistic one, marginalised down to a
-point estimate.
+The punchline: the Jacobi method *is* Gaussian belief propagation with the second moment deleted
+(verified to machine precision in the notebook). The classical iterative solver is not an alternative
+to the probabilistic one; it is the probabilistic one, marginalised down to a point estimate.
 
 ## Structure
 
-| # | Notebook | Contents |
-|---|----------|----------|
-| 1 | [`python/01-linear-systems-by-message-passing.py`](python/01-linear-systems-by-message-passing.py) | Problem specification → classical solvers → the probabilistic-numerics view → Gaussian belief propagation |
-| 2 | [`python/02-domain-decomposition-as-message-passing.py`](python/02-domain-decomposition-as-message-passing.py) | Parallel PDE solvers as block GaBP: Schur complements as messages, and what the belief does not know |
-
-Notebook 1 exists in two editions, which compute the same things and agree to the digits shown:
+The session is one notebook, which exists in two editions that compute the same things and agree to
+the digits shown:
 
 | edition | file |
 |---|---|
 | Python / marimo | [`python/01-linear-systems-by-message-passing.py`](python/01-linear-systems-by-message-passing.py) |
 | Julia / Pluto | [`julia/01-linear-systems-by-message-passing.jl`](julia/01-linear-systems-by-message-passing.jl) |
 
-Notebook 1 makes the *structural* argument and is honest that, on one laptop with a 2-D lattice, CG wins
-on iterations and the BP variances are over-confident. Notebook 2 puts the same construction where
-parallel PDE solvers actually live — a domain decomposed across ranks — and turns the "so what?" into a
-probabilistic-numerics question rather than an engineering one.
+It runs Problem specification → classical solvers → the probabilistic-numerics view → Gaussian belief
+propagation → research outlook, and is honest that, on one laptop with a 2-D lattice, CG wins on
+iterations and the BP variances are over-confident.
 
-See [`OUTLINE.md`](OUTLINE.md) for the talk narrative, timings and rehearsal notes.
+The notebook covers the classical solvers in two paragraphs. Three companion notebooks in
+[`extra/`](extra/) are the long version of those paragraphs, for participants who want the classical
+method in full before it reappears as message passing. They are self-contained and are not presented
+in the session.
 
-## The two arguments
+| # | Notebook | Contents |
+|---|----------|----------|
+| 1a | [`extra/01a-jacobi.py`](extra/01a-jacobi.py) | The splitting, the iteration matrix, the exact spectrum of the stencil, damped Jacobi and the smoothing factor |
+| 1b | [`extra/01b-gauss-seidel.py`](extra/01b-gauss-seidel.py) | Use-what-has-arrived, ρ_GS = ρ_J², why the ordering is a real choice, red–black parallelism, SOR and the optimal ω |
+| 1c | [`extra/01c-krylov.py`](extra/01c-krylov.py) | Krylov subspaces, CG as energy-norm optimality, the Chebyshev bound and why it is loose, eigenvalue clustering, the two all-reduces, preconditioning, BayesCG |
 
-**Notebook 1 — the reframing.** $p(x) \propto e^{-\frac12 x^\top A x + b^\top x} = \mathcal{N}(A^{-1}b, A^{-1})$,
-so the matrix is a precision matrix, its sparsity is a conditional-independence graph, the solution is a
-vector of marginal means, and $\mathrm{diag}(A^{-1})$ is the marginal variances. Belief propagation on that
-graph is a solver; Jacobi is that solver with the second moment deleted.
 
-**Notebook 2 — domain decomposition, and the gap it exposes.** Group the unknowns by subdomain and the
-factor graph coarsens to one node per rank. Then:
+## Installation
 
-* **Domain decomposition methods *are* message passing.** The message from subdomain $i$ to $j$ is exactly
-  the **Schur complement** $-A_{ij}^\top A_{ii}^{-1} A_{ij}$ — the discrete Dirichlet-to-Neumann map,
-  verified to machine zero. On a chain of subdomains, GaBP *is* block substructuring, converging in
-  exactly $P-1$ rounds.
-* **Granularity is a dial** from a direct solver (one subdomain, exact variances, one round) to scalar
-  belief propagation (one node per subdomain, most iterations, most bias). Coarse blocks absorb their
-  internal loops exactly — cluster-variation correction, reached from the numerics side.
-* **The parallel cost argument** is real but modest: a GaBP round is a halo exchange, a CG iteration is a
-  halo exchange plus an all-reduce barrier. Worth a constant factor, more under load imbalance.
-* **The belief is blind to its own numerical error** — and this is the point. The precision recursion
-  contains no $b$, so the reported uncertainty is *bit-identical* for two right-hand sides whose actual
-  errors differ several-fold. Meanwhile the question a PDE solver most needs answered — *when do I stop?*
-  — is decided by the discretisation error, which the belief also cannot see.
+### Python / marimo
 
-The third bullet is the probabilistic-numerics content; the first two are what make it a statement about
-a method thousands of people already run.
+The notebooks declare their dependencies inline ([PEP 723](https://peps.python.org/pep-0723/)), so
+the least invasive route is [`uv`](https://docs.astral.sh/uv/), which builds a throwaway environment
+per notebook and installs nothing globally.
 
-## Running the notebooks
+**1. Install `uv`** (skip if you have it — check with `uv --version`):
 
-Each notebook declares its dependencies inline ([PEP 723](https://peps.python.org/pep-0723/)), so with
-[`uv`](https://docs.astral.sh/uv/) installed it is self-contained:
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+`brew install uv`, `pipx install uv` and `pip install uv` also work.
+
+**2. Open the notebook.** Nothing else to install — `--sandbox` reads the dependency block and
+provisions Python, marimo, NumPy, SciPy and Plotly on first run:
 
 ```bash
 uvx marimo edit --sandbox python/01-linear-systems-by-message-passing.py
-uvx marimo edit --sandbox python/02-domain-decomposition-as-message-passing.py
 ```
 
-Or, in an environment with `marimo`, `numpy`, `scipy` and `plotly`:
+A browser tab opens at `http://localhost:2718`. The first launch downloads packages (tens of
+seconds); later launches are instant.
+
+<details>
+<summary>Alternative: a conventional virtual environment (no <code>uv</code>)</summary>
+
+Requires Python ≥ 3.11:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install marimo numpy scipy plotly
 marimo edit python/01-linear-systems-by-message-passing.py
 ```
 
-The Julia edition needs [Pluto](https://plutojl.org); it manages its own package environment, so a
-first open resolves `Plots` and `PlutoUI` (network required once):
+Conda works the same way:
+`conda create -n probnum2026 python=3.12 numpy scipy plotly && conda activate probnum2026 && pip install marimo`.
 
-```julia
-julia> using Pluto; Pluto.run()
+</details>
+
+### Julia / Pluto
+
+**1. Install Julia** via [`juliaup`](https://github.com/JuliaLang/juliaup) (skip if `julia --version`
+already reports ≥ 1.10):
+
+```bash
+# macOS / Linux
+curl -fsSL https://install.julialang.org | sh
+
+# Windows
+winget install julia -s msstore
 ```
 
-then open `julia/01-linear-systems-by-message-passing.jl` from the Pluto start page. All cells run in
-well under a second once the packages are compiled; the first load pays the usual Plots compilation.
+**2. Install Pluto**, once, into your default Julia environment:
 
-Notebook 1 runs end-to-end in about ten seconds. Notebook 2 is heavier on first load — it sweeps
-decomposition granularities and straggler slowdowns, each of which runs the solver to convergence — so
-open it before a session rather than restarting it live.
+```bash
+julia -e 'using Pkg; Pkg.add("Pluto")'
+```
+
+**3. Start Pluto and open the notebook:**
+
+```bash
+julia -e 'using Pluto; Pluto.run()'
+```
+
+A browser tab opens at `http://localhost:1234`. Paste the path to
+`julia/01-linear-systems-by-message-passing.jl` into the *Open a notebook* box on the start page.
+
+Pluto notebooks carry their own package environment, so the first open resolves and precompiles
+`Plots` and `PlutoUI` by itself — **network access is required once**, and that first load takes a
+few minutes, essentially all of it Plots precompilation. Do this before the session, not during it.
+
+### Verifying the install before the session
+
+Both editions run end-to-end in about ten seconds once packages are in place. A good check is to open
+the notebook, run all cells, and confirm the last section renders its plots — if the interactive
+sliders in §4 respond, everything is wired up correctly.
 
 ## Key references
 
