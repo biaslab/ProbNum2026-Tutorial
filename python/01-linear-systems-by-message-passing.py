@@ -11,9 +11,10 @@
 
 ProbNum 2026 tutorial — Gaussian belief propagation as a probabilistic linear solver.
 """
+
 import marimo
 
-__generated_with = "0.17.6"
+__generated_with = "0.23.15"
 app = marimo.App(width="medium")
 
 
@@ -24,6 +25,7 @@ def _():
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
     import plotly.graph_objects as go
+
     return go, mo, np, sp, spla
 
 
@@ -43,20 +45,18 @@ def _():
         h = hexcolor.lstrip("#")
         r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
         return f"rgba({r},{g},{b},{alpha})"
+
     return PAL, base_layout, hex_rgba
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    # Solving systems of equations with distributed probabilistic numerics
-
+    mo.md(r"""
     **ProbNum 2026 tutorial**
 
-    Probabilistic numerics turns a computation into an inference problem. That move is by now familiar for linear solvers: a Krylov method is a Gaussian agent that has seen $k$ matrix–vector products and reports a belief about $x_\ast = A^{-1}b$. It is also, at scale, expensive: the belief lives on all of $\mathbb{R}^n$, its covariance is dense, and every iteration needs global inner products — a synchronisation barrier across the whole machine.
+    Probabilistic numerics turns a computation into an inference problem. For linear solvers, a Krylov method is a Gaussian model that has seen $k$ matrix–vector products and reports a belief about $x_\ast = A^{-1}b$. It is also, at scale, expensive: the belief lives on all of $\mathbb{R}^n$, its covariance is dense, and every iteration needs global inner products.
 
-    This tutorial takes a different route to the same destination. Instead of treating $A$ as a black box we can only probe, we read its **sparsity pattern as a graphical model**. Solving $Ax = b$ then becomes *marginal inference* in a Gaussian Markov random field, and the natural algorithm is not conditioning-on-projections but **message passing**: every unknown is an agent, every non-zero $A_{ij}$ is a channel, and the solver is a conversation between neighbours.
+    This tutorial takes a different route to the same destination. Instead of treating $A$ as a black box we can only probe, we read its **sparsity pattern as a graphical model**. Solving $Ax = b$ then becomes *marginal inference* in a Gaussian Markov random field, and the natural algorithm is **message passing**.
 
     Nothing is global. No inner products, no barriers, no dense covariance. The belief is *local and anytime*: after $k$ rounds every node holds a distribution built from exactly the information that has reached it.
 
@@ -65,9 +65,8 @@ def _(mo):
     | **1. Problem specification** | large sparse systems, and why "large" forces "distributed" |
     | **2. Classical numerical approach** | direct factorisation, Jacobi/Gauss–Seidel, conjugate gradients |
     | **3. Probabilistic numerical approach** | $Ax=b$ as the mean of $\mathcal{N}(A^{-1}b,\, A^{-1})$ |
-    | **4. Message-passing version** | Gaussian belief propagation, and what it costs |
-    """
-    )
+    | **4. Message-passing version** | Gaussian belief propagation, and what it brings  |
+    """)
     return
 
 
@@ -76,12 +75,11 @@ def _(mo):
     mo.callout(
         mo.md(
             r"""
-    **Where this comes from.** The construction below is the Gaussian belief propagation (GaBP) solver of
-    Shental, Bickson, Siegel, Wolf & Dolev, *Gaussian belief propagation solver for systems of linear equations*
-    (ISIT 2008; extended version [arXiv:0810.1119](https://arxiv.org/abs/0810.1119)), together with its
-    interior-point descendant (Bickson et al., *Polynomial linear programming with Gaussian belief propagation*,
-    Allerton 2008) and its non-symmetric extension (Fanaskov, *Gaussian belief propagation solvers for
-    nonsymmetric systems of linear equations*, SIAM J. Sci. Comput. 2022).
+    **References**
+    - Shental, Bickson, Siegel, Wolf & Dolev, *Gaussian belief propagation solver for systems of linear equations*, International Symposium on Information Theory, 2008; extended version [arXiv:0810.1119](https://arxiv.org/abs/0810.1119).
+    - Bickson, Tock, Shental & Dolev, *Polynomial linear programming with Gaussian belief propagation*, Allerton Conference on Communication, Control, and Computing, 2008.
+    - Fanaskov, *Gaussian belief propagation solvers for nonsymmetric systems of linear equations*, SIAM Journal on Scientific Computing,  2022.
+    - Cockayne, Oates, Ipsen, & Girolami, *A Bayesian Conjugate-Gradient Method*, Bayesian Analysis, 2009.
     """
         ),
         kind="info",
@@ -91,9 +89,8 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ## 1. Problem specification
+    mo.md(r"""
+    # 1. Problem specification
 
     We want $x_\ast$ solving
 
@@ -101,7 +98,7 @@ def _(mo):
     A x = b, \qquad A \in \mathbb{R}^{n\times n} \ \text{symmetric},\ \text{sparse},
     $$
 
-    where $n$ is large enough that the interesting quantity is not "how many flops" but **how the work is laid out across machines**. Three properties of the regime matter, and they all point the same way:
+    where $n$ is large enough that the interesting quantity is not "how many flops" but **how the work is laid out across machines**.
 
     * **$A$ is sparse and structured.** It came from a discretised differential operator, a Gauss–Markov model, a network of sensors, a factor graph. Row $i$ couples $x_i$ to a handful of neighbours, and nothing else.
     * **The data is already distributed.** In a sensor network, a power grid, or a domain-decomposed PDE, the entries of row $i$ *live* on the machine that owns unknown $i$. Assembling $A$ centrally is not a step you would like to pay for.
@@ -113,8 +110,7 @@ def _(mo):
     * a **2-D lattice** — a five-point stencil for $(c - \Delta)u = f$, whose graph is *loopy*.
 
     The parameter $c \ge 0$ is a screening (reaction) term. It has a probabilistic meaning we will come back to: it sets the **correlation length** of the associated Gaussian field, and with it everything about how far information has to travel.
-    """
-    )
+    """)
     return
 
 
@@ -140,16 +136,15 @@ def _(np, sp):
         for k, (cx, cy) in enumerate(centers):
             f += (1.0 if k % 2 == 0 else -0.8) * np.exp(-((X - cx) ** 2 + (Y - cy) ** 2) / (2 * width ** 2))
         return f.ravel()
+
     return bump_forcing, chain_matrix, grid_matrix
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     The picture to keep in mind for the rest of the tutorial: **the matrix *is* a graph**. Node $i$ is the unknown $x_i$; there is an edge $\{i,j\}$ whenever $A_{ij} \neq 0$. Everything the solver will do is expressible as nodes talking along those edges.
-    """
-    )
+    """)
     return
 
 
@@ -185,13 +180,10 @@ def _(PAL, base_layout, go, grid_matrix, np, sp):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ## 2. Classical numerical approach
+    mo.md(r"""
+    # 2. Classical numerical approach
 
-    Three families, three different bargains.
-
-    **Direct solvers.** Factorise $A = LL^\top$ and substitute. Exact in exact arithmetic, and for the 2-D lattice the factor $L$ suffers *fill-in*: a banded matrix with $O(n)$ non-zeros produces a factor with $O(n^{3/2})$ of them. The graph view explains why — eliminating a node connects all of its neighbours to each other, so the graph densifies as you go.
+    **Direct solvers.** Factorise $A = LL^\top$ and substitute. Exact in exact arithmetic, and for the 2-D lattice the factor $L$ suffers fill-in: a banded matrix with $O(n)$ non-zeros produces a factor with $O(n^{3/2})$ of them. Eliminating a node connects all of its neighbours to each other, so the graph densifies as you go.
 
     **Stationary iterative methods.** Split $A = D + R$ and iterate
 
@@ -199,13 +191,12 @@ def _(mo):
     x^{(t+1)} = D^{-1}\bigl(b - R\,x^{(t)}\bigr) \qquad \text{(Jacobi)},
     $$
 
-    i.e. *each unknown solves its own equation, assuming its neighbours are right*. This is already local and distributed — node $i$ only needs $x_j$ for its neighbours. Gauss–Seidel is the same update with values used as soon as they are available (asynchronous rather than synchronous). Both are simple and both converge slowly, at a rate set by the spectral radius of the iteration matrix.
+    i.e. *each unknown solves its own equation, assuming its neighbours are right*. This is already local and distributed, as node $i$ only needs $x_j$ for its neighbours. Gauss–Seidel is the same update with values used as soon as they are available (asynchronous rather than synchronous). Both are simple and both converge slowly, at a rate set by the spectral radius of the iteration matrix.
 
-    **Krylov methods.** Conjugate gradients minimises the $A$-norm error over the Krylov space and converges in $O(\sqrt{\kappa}\,\log \varepsilon^{-1})$ iterations — far better, and the workhorse of computational science. The price is *globality*: every step needs $r^\top r$ and $p^\top Ap$, two inner products over all $n$ entries. On a distributed machine each is a barrier at which every processor waits for every other.
+    **Krylov methods.** Conjugate gradients minimises the $A$-norm error over the Krylov space and converges in $O(\sqrt{\kappa}\,\log \varepsilon^{-1})$ iterations, which is far better. The price is that every step needs $r^\top r$ and $p^\top Ap$, two inner products over all $n$ entries. On a distributed machine every processor must wait for every other.
 
-    All three return a **number**: a vector $x_k$, plus an error bound in terms of quantities ($\kappa$, $\|x_\ast\|$) that are exactly as unknown as the solution.
-    """
-    )
+    All three return a vector $x_k$ plus an error bound in terms of quantities ($\kappa$, $\|x_\ast\|$) that are exactly as unknown as the solution.
+    """)
     return
 
 
@@ -243,18 +234,18 @@ def _(np, sp, spla):
             rr = rr_new
             out.append(x.copy())
         return out
+
     return conjugate_gradients, stationary
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ## 3. Probabilistic numerical approach
+    mo.md(r"""
+    # 3. Probabilistic numerical approach
 
-    The usual probabilistic reading of a linear solver puts a Gaussian prior on $x$, treats each matrix–vector product as a linear observation $s_i^\top A x_\ast = s_i^\top b$, and conditions. It is a fine story — and it inherits a dense $n \times n$ covariance and a global policy for choosing $s_i$.
+    The usual probabilistic reading of a linear solver puts a Gaussian prior on $x$, treats each matrix–vector product as a linear observation $s_i^\top A x_\ast = s_i^\top b$, and conditions. It inherits a dense $n \times n$ covariance and a global policy for choosing $s_i$.
 
-    Here is a second reading, which needs no prior at all. For symmetric positive definite $A$, define
+    For symmetric positive definite $A$, define
 
     $$
     q(x) = \tfrac12 x^\top A x - b^\top x, \qquad
@@ -267,7 +258,7 @@ def _(mo):
     \boxed{\;p(x) \;=\; \mathcal{N}\bigl(x;\ A^{-1}b,\ A^{-1}\bigr).\;}
     $$
 
-    So the solution vector *is* the mean of a Gaussian whose **precision matrix is $A$ itself** (Shental et al. 2008, Prop. 8). Solving a linear system and computing the marginal means of a Gaussian Markov random field are the same problem, viewed from two sides:
+    So the solution vector *is* the mean of a Gaussian whose **precision matrix is $A$ itself** (Shental et al. 2008, Prop. 8). Solving a linear system and computing the marginal means of a Gaussian Markov random field are the same problem:
 
     | linear algebra | probabilistic inference |
     |:--|:--|
@@ -278,14 +269,13 @@ def _(mo):
     | diagonal of $A^{-1}$ | marginal variances $\sigma_i^2$ |
     | $1/A_{ii}$ | *conditional* variance of $x_i$ given its neighbours |
 
-    Two consequences are worth stating slowly.
+    This leads us to two observations
 
     1. **The uncertainty is free-standing.** We did not choose a prior and we are not modelling rounding error. The Gaussian is a re-encoding of the problem itself, and its marginal variances $(A^{-1})_{ii}$ are the quantity a statistician would want anyway when $A$ is a posterior precision (Gaussian process regression, GMRF models, Kalman smoothing, bundle adjustment).
     2. **Locality is now structural.** $A_{ij} = 0$ means $x_i \perp x_j \mid x_{\text{rest}}$. The graph of the matrix is the conditional independence graph of the belief, so an inference algorithm that only exchanges information along edges is *automatically* a solver that only communicates along the sparsity pattern.
 
     The last row of the table is the seed of the entire algorithm. A node that knows only its own equation knows the conditional variance $1/A_{ii}$; to upgrade it to the marginal variance $(A^{-1})_{ii}$ it has to hear from the rest of the graph.
-    """
-    )
+    """)
     return
 
 
@@ -317,11 +307,10 @@ def _(PAL, base_layout, go, np):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ## 4. The message-passing version
+    mo.md(r"""
+    # 4. The message-passing version
 
-    ### 4.1 The factor graph
+    ## 4.1 The factor graph
 
     Write the density as a product of one factor per node and one per edge:
 
@@ -335,7 +324,7 @@ def _(mo):
 
     The self-factor $\phi_i$ is row $i$'s own equation — it is $\mathcal{N}(x_i;\, b_i/A_{ii},\, 1/A_{ii})$, exactly the "solve my equation ignoring the coupling" belief that Jacobi starts from. The edge factor $\psi_{ij}$ is the coupling. **Every quantity in the factor graph is an entry of $A$ or $b$ that node $i$ already owns.**
 
-    ### 4.2 The messages
+    ## 4.2 The messages
 
     Sum-product on this graph: the message from $i$ to $j$ is
 
@@ -368,11 +357,10 @@ def _(mo):
     x_i \approx \mu_i, \quad (A^{-1})_{ii} \approx 1/P_i .
     $$
 
-    Note the sign: $P_{ij} = -A_{ij}^2 / P_{i\setminus j}$ is **negative**. Messages are not probability distributions — they are *information updates*, and what a neighbour tells you here is "you are less certain than you thought": each message pushes a node's belief from the conditional variance $1/A_{ii}$ towards the marginal variance $(A^{-1})_{ii} \ge 1/A_{ii}$.
+    Note the sign: $P_{ij} = -A_{ij}^2 / P_{i\setminus j}$ is **negative**. Messages are not probability distributions. Rather, they are *information updates*, and what a neighbour tells you here is "you are less certain than you thought": each message pushes a node's belief from the conditional variance $1/A_{ii}$ towards the marginal variance $(A^{-1})_{ii} \ge 1/A_{ii}$.
 
     Everything on the right-hand side is indexed by $i$ and its neighbours. There is no $n$ anywhere in the update.
-    """
-    )
+    """)
     return
 
 
@@ -388,6 +376,7 @@ def _(np, sp):
         pos = {(int(i), int(j)): e for e, (i, j) in enumerate(zip(src, dst))}
         rev = np.array([pos[(int(j), int(i))] for i, j in zip(src, dst)], dtype=int)
         return src, dst, a, rev
+
     return (edge_list,)
 
 
@@ -454,20 +443,19 @@ def _(edge_list, np, sp):
                 break
         return dict(mu=mu, var=1.0 / SP, res=res, mus=mus, sds=sds,
                     iters=len(res), converged=res[-1] < tol)
+
     return (gabp,)
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     That is the whole solver: 30 lines, no factorisation, no inner products, no $n$-dimensional linear algebra. `np.bincount` is standing in for what would be, on real hardware, each node summing its own inbox.
 
     ### 4.3 Sanity check on a $3\times3$ system
 
-    The toy example from Shental et al. (their eq. 47) is deliberately nasty: symmetric but **indefinite**, so "the Gaussian" is not a probability distribution at all. The algebra does not care.
-    """
-    )
+    The toy example from Shental et al. (their eq. 47) is symmetric but **indefinite**, so "the Gaussian" is not a probability distribution at all. The algebra does not care.
+    """)
     return
 
 
@@ -492,15 +480,13 @@ def _(gabp, mo, np, sp):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     ### 4.4 Trees: message passing *is* Gaussian elimination
 
-    If the graph of $A$ has no cycles, belief propagation is exact — in the means *and* in the variances — after at most as many rounds as the diameter of the tree (and in practice sooner: the messages stop changing once information has crossed a correlation length, not the whole graph). Shental et al. (Prop. 14) make the correspondence precise: on a tree, the message sweep from the leaves inward performs exactly the row operations of Gaussian elimination ($P_{i\setminus j}$ is the updated pivot $A_{ii} - \sum_l A_{li}^2/A_{ll}$), and reading off the marginals is forward substitution.
+    If the graph of $A$ has no cycles, belief propagation is exact after at most as many rounds as the diameter of the tree. In practice, this happens sooner: the messages stop changing once information has crossed a correlation length, not the whole graph. Shental et al. (Prop. 14) makes the correspondence precise: on a tree, the message sweep from the leaves inward performs exactly the row operations of Gaussian elimination ($P_{i\setminus j}$ is the updated pivot $A_{ii} - \sum_l A_{li}^2/A_{ll}$), and reading off the marginals is forward substitution.
 
-    A tridiagonal system is the simplest instance: GaBP on a chain **is** the Thomas algorithm, re-derived as inference. Below, both the solution and the marginal variances $(A^{-1})_{ii}$ come out to machine precision — and the variances are the diagonal of a dense inverse we never formed.
-    """
-    )
+    A tridiagonal system is the simplest instance: GaBP on a chain **is** the Thomas algorithm, re-derived as inference. Below, both the solution and the marginal variances $(A^{-1})_{ii}$ come out to machine precision and the variances are the diagonal of a dense inverse whose explicit formation was avoided.
+    """)
     return
 
 
@@ -518,7 +504,18 @@ def _(chain_matrix, gabp, np):
 
 
 @app.cell
-def _(PAL, base_layout, chain_bp, chain_v, chain_x, go, hex_rgba, mo, n_chain, np):
+def _(
+    PAL,
+    base_layout,
+    chain_bp,
+    chain_v,
+    chain_x,
+    go,
+    hex_rgba,
+    mo,
+    n_chain,
+    np,
+):
     _sd = np.sqrt(chain_bp["var"])
     _t = np.arange(n_chain)
     _fig = go.Figure()
@@ -548,13 +545,12 @@ def _(PAL, base_layout, chain_bp, chain_v, chain_x, go, hex_rgba, mo, n_chain, n
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ### 4.5 What "belief" means before convergence
+    mo.md(r"""
+    ## 4.5 What "belief" means before convergence
 
-    Here is where the probabilistic reading earns its keep. Run the message passing for $k$ rounds and stop. What is node $i$ holding?
+    Run the message passing for $k$ rounds and stop. What is node $i$ holding?
 
-    Exactly this: the marginal of the **computation tree of depth $k$** rooted at $i$ — the graph you get by unrolling the neighbourhood of $i$ for $k$ hops. That is the sub-problem whose information has physically reached node $i$ in $k$ rounds of communication. So the belief at iteration $k$ is not a heuristic error estimate; it is the *exact posterior of the part of the problem the node has seen so far*, and the sequence interpolates from
+    The marginal of the **computation tree of depth $k$** rooted at $i$. This is the graph you get by unrolling the neighbourhood of $i$ for $k$ hops. That is the sub-problem whose information has physically reached node $i$ in $k$ rounds of communication. So the belief at iteration $k$ is not a heuristic error estimate; it is the *exact posterior of the part of the problem the node has seen so far*, and the sequence interpolates from
 
     $$
     \text{iteration } 0:\quad \mathcal{N}\bigl(b_i/A_{ii},\; 1/A_{ii}\bigr)
@@ -568,11 +564,10 @@ def _(mo):
     \qquad\text{(the marginal: the whole system accounted for).}
     $$
 
-    Each node's uncertainty therefore *grows* as information arrives — the early over-confidence of "I'll just solve my own row" is corrected by neighbours. The belief is **local and anytime**: every node has one at every round, computed from the messages it happens to hold, with no global quantity ever assembled.
+    Each node's uncertainty therefore *grows* as information arrives. The early over-confidence of "I'll just solve my own row" is corrected by neighbours. The belief is **local and anytime**: every node has one at every round, computed from the messages it happens to hold, with no global quantity ever assembled.
 
     Watch the front of information sweep across the lattice.
-    """
-    )
+    """)
     return
 
 
@@ -679,15 +674,13 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ### 4.6 Loops: exact means, over-confident variances
+    mo.md(r"""
+    ## 4.6 Loops: exact means, over-confident variances
 
     On a graph with cycles the same information arrives at a node by several routes and gets double-counted. The remarkable fact (Weiss & Freeman 2001) is that this does **not** spoil the means: *if* GaBP converges, the marginal means are the exact solution $A^{-1}b$, cycles or no cycles. The variances are another matter — the computation tree that BP effectively solves keeps re-entering the same loop, and the walk-sum analysis of Malioutov, Johnson & Willsky (2006) shows BP counts only the self-return walks that revisit the root once. On an attractive model, where all those walks contribute with the same sign, the missing terms are positive, so BP **under-estimates** the variance: the solver is over-confident.
 
     That is the honest state of the art, and it is exactly the kind of statement the probabilistic-numerics community is equipped to improve on.
-    """
-    )
+    """)
     return
 
 
@@ -721,9 +714,8 @@ def _(PAL, base_layout, go, grid_bp, mo, np, var_grid, x_grid):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ### 4.7 The punchline: Jacobi is GaBP with the uncertainty deleted
+    mo.md(r"""
+    ## 4.7 The punchline: Jacobi is GaBP with the uncertainty deleted
 
     Take the algorithm above and make two changes:
 
@@ -732,9 +724,8 @@ def _(mo):
 
     What remains is $\mu_i = A_{ii}^{-1}\bigl(b_i - \sum_{k \neq i} A_{ki}\mu_k\bigr)$: **the Jacobi iteration** (Shental et al., Prop. 16). The classical stationary solver is the message-passing solver with the second moment thrown away and the cycle-avoidance thrown away.
 
-    This is the clearest statement of the tutorial's thesis. The classical method is not an alternative to the probabilistic one; it is the probabilistic one, marginalised down to a point estimate. Everything GaBP does beyond Jacobi — carrying precisions, excluding the reverse message — is *bookkeeping about information*, and it is what buys both the uncertainty estimate and the faster convergence.
-    """
-    )
+    The classical method is not an alternative to the probabilistic one; it is the probabilistic one, marginalised down to a point estimate. Unlike Jacobi, GaBP carries precisions and excludes the reverse message. It is just *bookkeeping about information*, and it is what buys both the uncertainty estimate and the faster convergence.
+    """)
     return
 
 
@@ -762,23 +753,28 @@ def _(A_grid, b_grid, gabp, mo, np, stationary):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ### 4.8 Scheduling: nobody has to wait
+    mo.md(r"""
+    ## 4.8 Scheduling: nobody has to wait
 
-    Message passing does not prescribe *when* nodes speak. Two standard choices:
+    * **Synchronous** — every node sends every round, using the previous round's messages. Like Jacobi.
+    * **Asynchronous** — sweep the nodes and use each message the moment it exists. Like Gauss–Seidel.
 
-    * **flooding (parallel)** — every node sends every round, using the previous round's messages. Synchronous, like Jacobi.
-    * **serial (asynchronous)** — sweep the nodes and use each message the moment it exists. Like Gauss–Seidel, and typically about twice as fast.
-
-    Neither needs an inner product, a norm, or any other quantity that couples all $n$ unknowns. Convergence is not destroyed by nodes running at different speeds, by stale messages, or by a node dropping out for a while — which is what makes the scheme viable on an unreliable, heterogeneous, or genuinely geographically distributed machine. Compare against the classical methods, remembering that each CG iteration hides two global barriers.
-    """
-    )
+    Neither needs an inner product, a norm, or any other quantity that couples all $n$ unknowns. Convergence is not destroyed by nodes running at different speeds, by stale messages, or by a node dropping out for a while. This is what makes the scheme viable on an unreliable, heterogeneous, or genuinely geographically distributed machine. Compare against the classical methods, remembering that each CG iteration hides two global barriers.
+    """)
     return
 
 
 @app.cell
-def _(A_chain, A_grid, b_chain, b_grid, conjugate_gradients, gabp, np, stationary):
+def _(
+    A_chain,
+    A_grid,
+    b_chain,
+    b_grid,
+    conjugate_gradients,
+    gabp,
+    np,
+    stationary,
+):
     def residual_curve(A, b, xs):
         _bn = np.linalg.norm(b)
         return [np.linalg.norm(A @ x - b) / _bn for x in xs]
@@ -845,17 +841,15 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ### 4.9 Does it scale?
+    mo.md(r"""
+    ## 4.9 Does it scale?
 
     Per round, each node sends one two-scalar message per incident edge: the cost is $O(\mathrm{nnz})$ arithmetic and $O(\mathrm{nnz})$ communication, all of it nearest-neighbour, all of it parallel. So the only question that matters is **how the round count grows with $n$** — and that is where the probabilistic reading pays off in intuition.
 
-    The screening parameter $c$ in $(c - \Delta)u = f$ sets the correlation length $\ell \sim 1/\sqrt{c}$ of the Gaussian field $\mathcal{N}(A^{-1}b, A^{-1})$. A node's marginal is determined by the nodes within a few $\ell$ of it; everything beyond is screened off. Information therefore has to travel a *fixed physical distance*, not across the whole domain — so the round count **saturates**: it stops growing with $n$, and the total work is $O(n)$ with perfect parallelism.
+    The screening parameter $c$ in $(c - \Delta)u = f$ sets the correlation length $\ell \sim 1/\sqrt{c}$ of the Gaussian field $\mathcal{N}(A^{-1}b, A^{-1})$. A node's marginal is determined by the nodes within a few $\ell$ of it; everything beyond is screened off. Information therefore has to travel a *fixed physical distance*, not across the whole domain. So the round count **saturates**: it stops growing with $n$, and the total work is $O(n)$ with perfect parallelism.
 
-    At $c = 0$ the correlation length is the domain size, every node needs to hear from every other, and the round count grows like the diameter. This is not a defect of message passing; it is the same long-range coupling that makes unpreconditioned Jacobi and CG slow, showing up in probabilistic clothing — and it says precisely what a preconditioner has to do: *shorten the correlation length*.
-    """
-    )
+    At $c = 0$ the correlation length is the domain size, every node needs to hear from every other, and the round count grows like the diameter. This is not a defect of message passing; it is the same long-range coupling that makes unpreconditioned Jacobi and CG slow. It states what a preconditioner has to do: *shorten the correlation length*.
+    """)
     return
 
 
@@ -912,9 +906,8 @@ def _(mo, scale_data, scale_screens):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ### 4.10 When it fails
+    mo.md(r"""
+    ## 4.10 When it fails
 
     GaBP is not unconditionally convergent, and the sufficient conditions are the familiar ones:
 
@@ -922,9 +915,8 @@ def _(mo):
     * **walk-summability**, $\rho\bigl(|I - D^{-1}A|\bigr) < 1$ with $D = \operatorname{diag}(A)$, a strictly weaker condition (Malioutov et al. 2006);
     * a **tree**, in which case it converges exactly regardless of the spectral radius.
 
-    In practice the basin is considerably larger than those conditions — but it does have an edge. Below, a lattice with random $\pm w$ couplings (a "frustrated" model, the sort where loops carry conflicting information) sweeps from harmless to divergent. Watch the diagnostics: the walk-summability bound is crossed long before anything goes wrong, and then convergence fails somewhere near the point where the Gaussian stops being a valid distribution at all.
-    """
-    )
+    In practice the basin is considerably larger than those conditions. But it does have an edge. Below, a lattice with random $\pm w$ couplings (a "frustrated" model, the sort where loops carry conflicting information) sweeps from harmless to divergent. Watch the diagnostics: the walk-summability bound is crossed long before anything goes wrong, and then convergence fails somewhere near the point where the Gaussian stops being a valid distribution at all.
+    """)
     return
 
 
@@ -942,6 +934,7 @@ def _(grid_matrix, np, sp):
             rows.append(i); cols.append(j); vals.append(w * sign[key])
         Ao = sp.coo_matrix((vals, (rows, cols)), shape=(m * m, m * m))
         return (sp.eye(m * m) + Ao).tocsr()
+
     return (frustrated_matrix,)
 
 
@@ -1012,27 +1005,26 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-    ## 5. Where this goes
+    mo.md(r"""
+    # 5. Where this goes
 
     We arrived at a linear solver that is local, asynchronous, communication-light, and reports a per-node uncertainty as a by-product — and whose classical counterpart (Jacobi) is literally itself with the second moment deleted. That combination is the argument of this tutorial: **probabilistic numerics at scale wants message passing, because message passing is what turns a global belief into a distributed one.**
 
-    Four directions from here.
+    Possible research directions:
 
     * **Beyond symmetry.** GaBP as derived needs $A = A^\top$. Shental et al. (§VII) embed a rectangular $S$ into the symmetric system $\bigl(\begin{smallmatrix} I & S^\top \\ S & -\Psi \end{smallmatrix}\bigr)$, whose solution is the ridge/pseudo-inverse estimate $(S^\top S + \Psi)^{-1}S^\top y$ — with $2nk$ messages rather than $n^2$. Fanaskov (2022) instead modifies the messages themselves for non-symmetric $A$, relates the result to LU and block-LU factorisation, and uses GaBP as a **multigrid smoother**, where it is markedly more robust than incomplete-LU or Gauss–Seidel smoothing.
     * **Beyond linear systems.** Because an interior-point method is a sequence of linear systems (Newton steps on the Hessian), swapping each solve for GaBP gives a **distributed linear-programming solver** (Bickson et al. 2008). The same substitution works anywhere a Newton step is the inner loop.
     * **Better uncertainty.** The means are exact on convergence; the variances are not. Generalised BP / the cluster-variation method (the second algorithm in Fanaskov 2022), or the walk-sum corrections of Johnson et al., trade locality for calibration. *What is the cheapest message-passing scheme with honest variances?* is a probabilistic-numerics question, not a linear-algebra one.
     * **Applications where the graph is real.** Power-grid state estimation, sensor-network localisation, SLAM and bundle adjustment (Gaussian BP is the engine of several modern SLAM back-ends), CDMA multiuser detection — in each case the factor graph is not a metaphor for the sparsity pattern; it is the physical layout of the machine.
 
-    ### Exercises
+    <!-- ### Exercises
 
     1. **Elimination by hand.** Take a 5-node tree, run `gabp` for one sweep, and check that $P_{i\setminus j}$ equals the pivot $A_{ii} - \sum_{l} A_{li}^2/A_{ll}$ produced by Gaussian elimination from the leaves. (Shental et al., Prop. 14.)
     2. **Correlation length.** For the screened lattice, measure the round count as a function of $c$ and compare it against $\ell = 1/\sqrt{c}$ measured directly from the decay of $(A^{-1})_{ij}$ with $\|i - j\|$.
     3. **Preconditioning as re-modelling.** Apply a Jacobi and then an incomplete-Cholesky preconditioner and re-run GaBP on the preconditioned system. Explain the change in round count in terms of correlation length rather than condition number.
     4. **Anytime calibration.** For the loopy lattice, plot the actual error $|\mu_i^{(k)} - x_{\ast i}|$ against the belief standard deviation $\sqrt{1/P_i^{(k)}}$ at each round $k$. Is the $k$-round belief a usable stopping criterion? Where is it over-confident, and by how much?
     5. **Asynchrony.** Modify the serial schedule to update a random 30% of nodes per round, or to use messages one round stale. How much does the round count degrade? (This is the experiment that decides whether the method survives on real hardware.)
-    6. **Non-symmetric.** Implement the augmented system of Shental et al. §VII and solve a rectangular least-squares problem by message passing. Compare against `scipy.sparse.linalg.lsqr`.
+    6. **Non-symmetric.** Implement the augmented system of Shental et al. §VII and solve a rectangular least-squares problem by message passing. Compare against `scipy.sparse.linalg.lsqr`. -->
 
     ### References
 
@@ -1043,8 +1035,7 @@ def _(mo):
     * Malioutov, D. M., Johnson, J. K., & Willsky, A. S. (2006). *Walk-sums and belief propagation in Gaussian graphical models*. JMLR, 7, 2031–2064.
     * Hennig, P., Osborne, M. A., & Kersting, H. P. (2022). *Probabilistic Numerics: Computation as Machine Learning*. Cambridge University Press.
     * Cockayne, J., Oates, C. J., Ipsen, I. C. F., & Girolami, M. (2019). *A Bayesian conjugate gradient method*. Bayesian Analysis, 14(3), 937–1012.
-    """
-    )
+    """)
     return
 
 
