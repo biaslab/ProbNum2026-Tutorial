@@ -92,24 +92,36 @@ def _(mo):
     mo.md(r"""
     # 1. Problem specification
 
-    We want $x_\ast$ solving
+    ### Why would anyone solve $Ax = b$?
+
+    Take a tiled accelerator: a few thousand compute tiles on one die, each with its own power counters, its own temperature sensor, and its own ability to throttle its clock. The chip is thermally interesting. A tile that runs hot has to slow down — but so, often, do its neighbours, because heat spreads sideways through the silicon faster than any of them can react. To decide who throttles, the control loop needs the **steady-state temperature of every tile**, and it needs it refreshed faster than the die's thermal time constant.
+
+    The physics fits in one line. Tile $i$ dissipates power $b_i$; it conducts heat to the four tiles it touches; and it loses heat to the coolant at a rate proportional to how far above ambient it sits. In steady state the three terms balance:
 
     $$
-    A x = b, \qquad A \in \mathbb{R}^{n\times n} \ \text{symmetric},\ \text{sparse},
+    \underbrace{c\,x_i}_{\text{lost to the coolant}} \;+\; \underbrace{\sum_{j \sim i}\,(x_i - x_j)}_{\text{conducted to neighbours}} \;=\; \underbrace{b_i}_{\text{dissipated on tile } i}.
     $$
 
-    where $n$ is large enough that the interesting quantity is not "how many flops" but **how the work is laid out across machines**.
+    That is one equation per tile, each involving five unknowns, and it is exactly the five-point discretisation of the screened Poisson equation $(c - \Delta)u = f$. Stack the tile temperatures into $x$ and the dissipated powers into $b$ and the control loop is asking for
 
-    * **$A$ is sparse and structured.** It came from a discretised differential operator, a Gauss–Markov model, a network of sensors, a factor graph. Row $i$ couples $x_i$ to a handful of neighbours, and nothing else.
-    * **The data is already distributed.** In a sensor network, a power grid, or a domain-decomposed PDE, the entries of row $i$ *live* on the machine that owns unknown $i$. Assembling $A$ centrally is not a step you would like to pay for.
-    * **Global synchronisation is the bottleneck.** On a large machine the wall-clock cost of an iteration is dominated by all-reduce operations, not by arithmetic. Krylov methods need two inner products per step; that is two barriers per step.
+    $$
+    A x = b, \qquad A \in \mathbb{R}^{n\times n}\ \ \text{symmetric},\ \text{sparse},\ \text{one row per tile.}
+    $$
 
-    Our running examples are the two graph topologies that bracket the difficulty:
+    Keep the die in mind, because three features of it are what this tutorial is really about — and they are not special to silicon. The same three hold for a power grid, a sensor network, a robot swarm and a domain-decomposed PDE; the die is just the case where they are hardest to argue with.
 
-    * a **chain** — a tridiagonal system, whose graph is a *tree*;
-    * a **2-D lattice** — a five-point stencil for $(c - \Delta)u = f$, whose graph is *loopy*.
+    * **$A$ is sparse and structured — it *is* the floorplan.** Row $i$ couples $x_i$ to the handful of tiles it physically touches, and to nothing else. The graph of the matrix is the layout of the chip. (Elsewhere it is a discretised differential operator, a Gauss–Markov model, a network of sensors — same picture.)
+    * **The data is already distributed.** $b_i$ is a number tile $i$'s own counters measured, and row $i$ of $A$ is a property of tile $i$'s own package. Nothing was ever assembled anywhere. Assembling it means shipping every tile's telemetry to one place — every control period, forever.
+    * **Global synchronisation is the bottleneck.** With a few thousand tiles, a barrier costs more than the arithmetic between barriers, and by the time everyone has checked in, the temperature field has moved. Krylov methods need two inner products per step: that is two barriers per step.
 
-    The parameter $c \ge 0$ is a screening (reaction) term. It has a probabilistic meaning we will come back to: it sets the **correlation length** of the associated Gaussian field, and with it everything about how far information has to travel.
+    So $n$ is large enough that the interesting quantity is not "how many flops" but **how the work is laid out across the machine** — and, since we are at a probabilistic-numerics meeting, what each tile is entitled to believe while the answer is still arriving.
+
+    Our two running examples are the topologies that bracket the difficulty:
+
+    * a **chain** — one row of tiles, a tridiagonal system, whose graph is a *tree*;
+    * a **2-D lattice** — the whole die, a five-point stencil for $(c - \Delta)u = f$, whose graph is *loopy*.
+
+    The parameter $c \ge 0$ is the screening (reaction) term — here, the strength of the coupling to the coolant. It already has a physical meaning: it sets how far a hotspot is felt. A well-cooled die screens each hot tile into a small halo; a poorly cooled one lets hotspots talk to each other across the chip. It has a probabilistic meaning too, which we will come back to: $c$ sets the **correlation length** of the associated Gaussian field, and with it everything about how far information has to travel.
     """)
     return
 
@@ -272,6 +284,8 @@ def _(mo):
     This leads us to two observations
 
     1. **The uncertainty is free-standing.** We did not choose a prior and we are not modelling rounding error. The Gaussian is a re-encoding of the problem itself, and its marginal variances $(A^{-1})_{ii}$ are the quantity a statistician would want anyway when $A$ is a posterior precision (Gaussian process regression, GMRF models, Kalman smoothing, bundle adjustment).
+
+       Back on the die, that quantity is not a statistical abstraction either: $(A^{-1})_{ij}$ is the temperature rise at tile $i$ per unit of power dissipated at tile $j$ — the **thermal impedance** of the chip, which is what a thermal engineer would have measured. Its diagonal, the marginal variance, is how hot tile $i$ gets from its own watt *once the rest of the die has been allowed to warm up in response*. The conditional variance $1/A_{ii}$ is the same number computed with every neighbour pinned to ambient: the answer a tile would give if it believed it were the only warm thing on the chip. The gap between those two is real, physical, and — as §4 will show — is precisely what the messages carry.
     2. **Locality is now structural.** $A_{ij} = 0$ means $x_i \perp x_j \mid x_{\text{rest}}$. The graph of the matrix is the conditional independence graph of the belief, so an inference algorithm that only exchanges information along edges is *automatically* a solver that only communicates along the sparsity pattern.
 
     The last row of the table is the seed of the entire algorithm. A node that knows only its own equation knows the conditional variance $1/A_{ii}$; to upgrade it to the marginal variance $(A^{-1})_{ii}$ it has to hear from the rest of the graph.
@@ -566,6 +580,8 @@ def _(mo):
 
     Each node's uncertainty therefore *grows* as information arrives. The early over-confidence of "I'll just solve my own row" is corrected by neighbours. The belief is **local and anytime**: every node has one at every round, computed from the messages it happens to hold, with no global quantity ever assembled.
 
+    In the story of §1: at round 0 every tile reports the temperature it would reach if it were the only warm thing on the die, and reports it with the confidence of the isolated. Round by round it learns that its neighbours are warm, that theirs are, and that it sits in a hot region of the chip — its estimate rises and its stated certainty falls. After $k$ rounds a tile has accounted for exactly the $k$-hop patch of silicon around it. **That patch is what its belief describes** — not, as the next box insists, how wrong its number is.
+
     Watch the front of information sweep across the lattice.
     """)
     return
@@ -587,8 +603,8 @@ def _(mo):
     unchanged to the last bit, while the errors are completely different. So the belief cannot be
     tracking the error, and the two converge on schedules that have nothing to do with each other.
 
-    That gap — an anytime *belief* that is not an anytime *error estimate* — is the open problem notebook
-    2 measures and tries to name precisely.
+    That gap — an anytime *belief* that is not an anytime *error estimate* — is, to us, the most
+    interesting open problem in this whole construction, and §5 comes back to it.
     """
         ),
         kind="warn",
@@ -995,7 +1011,7 @@ def _(mo):
     mo.callout(
         mo.md(
             r"""
-    **Try it.** Push $w$ up from 0.05. Diagonal dominance is lost almost immediately and walk-summability around $w \approx 0.26$, yet the solver keeps converging; it only breaks around $w \approx 0.295$, essentially where $A$ stops being positive definite. Then turn on damping, $P \leftarrow (1-\alpha)P_{\text{new}} + \alpha P_{\text{old}}$: it buys smoothness in the borderline regime but does **not** rescue the indefinite case — and it should not, because there is no valid Gaussian left to infer. Sharp characterisations of the convergence basin, and principled fixes outside it, remain open (see Johnson et al. 2009, Ruozzi & Tatikonda 2013).
+    **Try it.** Push $w$ up from 0.05. The unit diagonal is beaten by the four couplings at $w = 0.25$ and walk-summability goes one step later at $w \approx 0.26$ — the two sufficient conditions fail together, and neither failure costs anything: the solver keeps converging, taking 45 rounds at $w = 0.26$ and 297 at $w = 0.29$. It breaks between $w = 0.29$ and $w = 0.30$, which is essentially where $A$ stops being positive definite ($\lambda_{\min} = +0.007$ at $w = 0.30$). Then turn on damping, $P \leftarrow (1-\alpha)P_{\text{new}} + \alpha P_{\text{old}}$: it buys smoothness in the borderline regime but does **not** rescue the indefinite case — and it should not, because there is no valid Gaussian left to infer. Sharp characterisations of the convergence basin, and principled fixes outside it, remain open (see Johnson et al. 2009, Ruozzi & Tatikonda 2013).
     """
         ),
         kind="warn",
@@ -1014,8 +1030,8 @@ def _(mo):
 
     * **Beyond symmetry.** GaBP as derived needs $A = A^\top$. Shental et al. (§VII) embed a rectangular $S$ into the symmetric system $\bigl(\begin{smallmatrix} I & S^\top \\ S & -\Psi \end{smallmatrix}\bigr)$, whose solution is the ridge/pseudo-inverse estimate $(S^\top S + \Psi)^{-1}S^\top y$ — with $2nk$ messages rather than $n^2$. Fanaskov (2022) instead modifies the messages themselves for non-symmetric $A$, relates the result to LU and block-LU factorisation, and uses GaBP as a **multigrid smoother**, where it is markedly more robust than incomplete-LU or Gauss–Seidel smoothing.
     * **Beyond linear systems.** Because an interior-point method is a sequence of linear systems (Newton steps on the Hessian), swapping each solve for GaBP gives a **distributed linear-programming solver** (Bickson et al. 2008). The same substitution works anywhere a Newton step is the inner loop.
-    * **Better uncertainty.** The means are exact on convergence; the variances are not. Generalised BP / the cluster-variation method (the second algorithm in Fanaskov 2022), or the walk-sum corrections of Johnson et al., trade locality for calibration. *What is the cheapest message-passing scheme with honest variances?* is a probabilistic-numerics question, not a linear-algebra one.
-    * **Applications where the graph is real.** Power-grid state estimation, sensor-network localisation, SLAM and bundle adjustment (Gaussian BP is the engine of several modern SLAM back-ends), CDMA multiuser detection — in each case the factor graph is not a metaphor for the sparsity pattern; it is the physical layout of the machine.
+    * **Better uncertainty.** Two distinct problems, and this tutorial solves neither. *First*, the means are exact on convergence but the variances are not: generalised BP / the cluster-variation method (the second algorithm in Fanaskov 2022), or the walk-sum corrections of Johnson et al., buy calibration by giving up locality. **What is the cheapest message-passing scheme with honest variances?** *Second*, and more fundamental (§4.5): the belief is a statement about the $k$-hop sub-problem, not about the error, because the precision recursion never sees $b$. An anytime *belief* is not an anytime *error estimate*, and nothing in the classical GaBP literature is trying to make it one. **What would a message that carried error information — rather than only information about $A$ — even look like?** Both are probabilistic-numerics questions, not linear-algebra ones; the second is the one we would most like an answer to.
+    * **Applications where the graph is real.** Power-grid state estimation, sensor-network localisation, SLAM and bundle adjustment (Gaussian BP is the engine of several modern SLAM back-ends), CDMA multiuser detection — in each case the factor graph is not a metaphor for the sparsity pattern; it is the physical layout of the machine. The die of §1 is the limiting case, where the graph is *literally* the silicon; and that this is a good bargain in wall-clock, not just in rhetoric, has been measured. Ortiz et al. (2020) solved a real bundle-adjustment problem by GaBP on the 1216 cores of a single graph processor in under 40 ms, against 1450 ms for a sparse-Cholesky CPU library — the whole margin coming from an algorithm that never needs anything but nearest-neighbour exchange.
 
     <!-- ### Exercises
 
@@ -1035,6 +1051,7 @@ def _(mo):
     * Malioutov, D. M., Johnson, J. K., & Willsky, A. S. (2006). *Walk-sums and belief propagation in Gaussian graphical models*. JMLR, 7, 2031–2064.
     * Hennig, P., Osborne, M. A., & Kersting, H. P. (2022). *Probabilistic Numerics: Computation as Machine Learning*. Cambridge University Press.
     * Cockayne, J., Oates, C. J., Ipsen, I. C. F., & Girolami, M. (2019). *A Bayesian conjugate gradient method*. Bayesian Analysis, 14(3), 937–1012.
+    * Ortiz, J., Pupilli, M., Leutenegger, S., & Davison, A. J. (2020). *Bundle adjustment on a graph processor*. CVPR, 2413–2422. [arXiv:2003.03134](https://arxiv.org/abs/2003.03134).
     """)
     return
 

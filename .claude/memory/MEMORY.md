@@ -1,2 +1,2 @@
-- [ProbNum 2026 tutorial — notebook 01](probnum2026-tutorial-notebook01.md) — thesis, arc, numbers and the "no tangible benefit yet" gap in the GaBP linear-solver draft.
+- [ProbNum 2026 tutorial — notebook 01](probnum2026-tutorial-notebook01.md) — thesis, arc, verified numbers and the rehearsed answer to "why bother?" for the talk notebook.
 - [Where GaBP actually wins](gabp-tangible-benefit-literature.md) — literature with measured advantages for message passing over classical/probnum solvers, plus the honest counterpoint.
