@@ -44,5 +44,14 @@ first — (1) not on iterations, not on variances, and selected inversion beats 
 (3) on what it reveals — a well-posed probnum problem inside a method thousands of people run. Evidence
 for part 2 is in [[gabp-tangible-benefit-literature]].
 
+**Editions.** Notebook 01 exists in Python/marimo (`python/01-...py`, the presentation copy) and
+Julia/Pluto (`julia/01-...jl`, added 2026-08-24). They agree on every headline number except two that
+depend on the RNG: the chain's `b` (Julia errors 1.1e-13 / 1.1e-16) and the frustrated lattice's random
+sign pattern, where Julia takes 353 rounds at w=0.29 and has lambda_min=+0.010 at w=0.30 against Python's
+297 and +0.007. Both callouts are written with their own edition's numbers — do not copy one into the
+other. Two Pluto-specific traps: `$` is live interpolation inside `md"""..."""` so all maths uses double
+backticks and ```math fences, and a multi-line `$(...)` interpolation does not parse (the scaling table is
+built with `Markdown.parse` instead).
+
 **Caveat about the repo's own docs:** `README.md` still describes a two-notebook tutorial and frames
 notebook 2 as the payoff. It contradicts `OUTLINE.md` as of 2026-08-24 and has not been updated.

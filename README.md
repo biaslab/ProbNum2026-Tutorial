@@ -21,6 +21,13 @@ point estimate.
 | 1 | [`python/01-linear-systems-by-message-passing.py`](python/01-linear-systems-by-message-passing.py) | Problem specification → classical solvers → the probabilistic-numerics view → Gaussian belief propagation |
 | 2 | [`python/02-domain-decomposition-as-message-passing.py`](python/02-domain-decomposition-as-message-passing.py) | Parallel PDE solvers as block GaBP: Schur complements as messages, and what the belief does not know |
 
+Notebook 1 exists in two editions, which compute the same things and agree to the digits shown:
+
+| edition | file |
+|---|---|
+| Python / marimo | [`python/01-linear-systems-by-message-passing.py`](python/01-linear-systems-by-message-passing.py) |
+| Julia / Pluto | [`julia/01-linear-systems-by-message-passing.jl`](julia/01-linear-systems-by-message-passing.jl) |
+
 Notebook 1 makes the *structural* argument and is honest that, on one laptop with a 2-D lattice, CG wins
 on iterations and the BP variances are over-confident. Notebook 2 puts the same construction where
 parallel PDE solvers actually live — a domain decomposed across ranks — and turns the "so what?" into a
@@ -70,6 +77,16 @@ Or, in an environment with `marimo`, `numpy`, `scipy` and `plotly`:
 ```bash
 marimo edit python/01-linear-systems-by-message-passing.py
 ```
+
+The Julia edition needs [Pluto](https://plutojl.org); it manages its own package environment, so a
+first open resolves `Plots` and `PlutoUI` (network required once):
+
+```julia
+julia> using Pluto; Pluto.run()
+```
+
+then open `julia/01-linear-systems-by-message-passing.jl` from the Pluto start page. All cells run in
+well under a second once the packages are compiled; the first load pays the usual Plots compilation.
 
 Notebook 1 runs end-to-end in about ten seconds. Notebook 2 is heavier on first load — it sweeps
 decomposition granularities and straggler slowdowns, each of which runs the solver to convergence — so
