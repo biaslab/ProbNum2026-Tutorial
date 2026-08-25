@@ -54,11 +54,11 @@ def _(mo):
     mo.md(r"""
     **ProbNum 2026 tutorial**
 
-    Probabilistic numerics turns a computation into an inference problem. For linear solvers, a Krylov method is a Gaussian model that has seen $k$ matrix–vector products and reports a belief about $x_\ast = A^{-1}b$. It is also, at scale, expensive: the belief lives on all of $\mathbb{R}^n$, its covariance is dense, and every iteration needs global inner products.
+    Probabilistic numerics turns a computation into an inference problem. Consider a linear system of equations $Ax = b$ where we'd like to solve for $x$ given a matrix $A$ and vector $b$. There exist several ways to approach this problem, some deterministic and some probabilistic. For an example of a probablistic method, a Krylov method is a Gaussian model that has seen $k$ matrix–vector products and reports a belief about $x_\ast = A^{-1}b$. At scale, this is expensive: the belief lives on all of $\mathbb{R}^n$, its covariance is dense, and every iteration needs global inner products.
 
-    This tutorial takes a different route to the same destination. Instead of treating $A$ as a black box we can only probe, we read its **sparsity pattern as a graphical model**. Solving $Ax = b$ then becomes *marginal inference* in a Gaussian Markov random field, and the natural algorithm is **message passing**.
+    This tutorial aims to present solution of this problem in general, and then in particular present message-passing as a means to efficiently and intuitively solve such problems at scale. When $A$ is sparse, we can exploit its structure. Instead of treating $A$ as a black box we can only probe, we can read its sparsity pattern as a graphical model. Solving $Ax = b$ then becomes marginal inference in a Gaussian Markov random field, and the natural algorithm is message passing.
 
-    Nothing is global. No inner products, no barriers, no dense covariance. The belief is *local and anytime*: after $k$ rounds every node holds a distribution built from exactly the information that has reached it.
+    Nothing is global. No inner products, no barriers, no dense covariance. The belief is *local and anytime*: after $k$ iterations every node holds a distribution built from exactly the information that has reached it.
 
     | | |
     |:--|:--|
