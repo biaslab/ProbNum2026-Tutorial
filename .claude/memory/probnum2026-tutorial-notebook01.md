@@ -53,5 +53,16 @@ other. Two Pluto-specific traps: `$` is live interpolation inside `md"""..."""` 
 backticks and ```math fences, and a multi-line `$(...)` interpolation does not parse (the scaling table is
 built with `Markdown.parse` instead).
 
+**Companion notebooks** (marimo, added 2026-08-24, self-contained, not presented): `01a-jacobi.py`,
+`01b-gauss-seidel.py`, `01c-krylov.py` expand notebook 01's two-paragraph §2. Verified facts they rest
+on, for the 24x24 stencil with c=0.4: rho(M_Jacobi) = 4cos(pi h)/(4+c) = 0.901922 analytically and
+numerically; damped Jacobi at omega=2/3 has smoothing factor 0.295; rho_GS = rho_J^2 to nine digits, for
+natural, reverse and red-black orderings alike; SOR's omega* = 2/(1+sqrt(1-rho_J^2)) = 1.396748 with
+measured rate 0.396748 exactly matching omega*-1; kappa = 19.39 and CG takes 40 iterations to 1e-10
+against the Chebyshev bound's 52. Two traps found by testing and now baked into the text: the Jacobi
+preconditioner is an exact no-op on this stencil (D is a multiple of I, kappa 19.4 -> 19.4), and
+eigenvalue clustering only gives the crisp "l clusters, l iterations" result for *exact* clusters (6
+iterations) -- a relative width of just 1e-6 already costs 17.
+
 **Caveat about the repo's own docs:** `README.md` still describes a two-notebook tutorial and frames
 notebook 2 as the payoff. It contradicts `OUTLINE.md` as of 2026-08-24 and has not been updated.
