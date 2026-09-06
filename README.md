@@ -130,26 +130,14 @@ sliders in §4 respond, everything is wired up correctly.
   *Gaussian belief propagation solver for systems of linear equations*. IEEE ISIT, 1863–1867.
   [doi:10.1109/ISIT.2008.4595311](https://doi.org/10.1109/ISIT.2008.4595311) ·
   extended version [arXiv:0810.1119](https://arxiv.org/abs/0810.1119).
-  *The core algorithm: the GaBP message updates, the equivalence of GaBP on trees with Gaussian
-  elimination, and of GaBP with the precision messages clamped to zero with Jacobi.*
 * D. Bickson, Y. Tock, O. Shental & D. Dolev (2008).
   *Polynomial linear programming with Gaussian belief propagation*. Allerton, 895–901.
   [doi:10.1109/ALLERTON.2008.4797652](https://doi.org/10.1109/ALLERTON.2008.4797652).
-  *Interior-point LP where each Newton step is solved by message passing.*
 * V. Fanaskov (2022). *Gaussian belief propagation solvers for nonsymmetric systems of linear
   equations*. SIAM J. Sci. Comput. 44(2), A77–A102.
   [doi:10.1137/19M1275139](https://doi.org/10.1137/19M1275139) ·
   [arXiv:1904.04093](https://arxiv.org/abs/1904.04093).
-  *Non-symmetric GaBP, a generalised-BP (cluster variation) matrix inversion, links to LU and
-  block-LU, and GaBP as a multigrid smoother.*
 * Y. Weiss & W. T. Freeman (2001). *Correctness of belief propagation in Gaussian graphical models of
-  arbitrary topology*. Neural Computation 13(10), 2173–2200. *Means exact on convergence, variances not.*
+  arbitrary topology*. Neural Computation 13(10), 2173–2200. 
 * D. M. Malioutov, J. K. Johnson & A. S. Willsky (2006). *Walk-sums and belief propagation in Gaussian
-  graphical models*. JMLR 7, 2031–2064. *Walk-summability, and why the BP variances are over-confident.*
-
-## Archive
-
-`archive/` holds the earlier, broader draft of the tutorial: five paired Julia/Pluto and Python/Marimo
-notebooks covering the five classic problem settings of
-[probabilistic-numerics.org](https://www.probabilistic-numerics.org). It is kept for reference and for
-material that may be recycled — the current tutorial deliberately goes narrow and deep instead.
+  graphical models*. JMLR 7, 2031–2064. 
