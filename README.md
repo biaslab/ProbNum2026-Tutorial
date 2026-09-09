@@ -3,6 +3,7 @@
 Tutorial for the [2nd International Conference on Probabilistic Numerics](https://probnum2026.github.io).
 
 **Probabilistic numerics at scale by distributed inference** 
+
 In this tutorial, we are looking at the sparsity pattern of the $A$ matrix in a system 
 of linear equations as a graphical model and turn solving $Ax=b$ into marginal inference in a
 Gaussian Markov random field, and the solver into a message passing procedure that is
