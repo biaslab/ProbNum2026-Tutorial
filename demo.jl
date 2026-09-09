@@ -2,10 +2,10 @@
 # v1.0.3
 
 #> [frontmatter]
-#> title = "Linear systems by message passing"
-#> date = "2026-08-24"
-#> tags = ["probabilistic numerics", "belief propagation", "linear solvers", "distributed inference"]
-#> description = "ProbNum 2026 tutorial: solving Ax = b as marginal inference in a Gaussian Markov random field, and the classical iterative solvers as message passing with the uncertainty deleted."
+#> title = "Keep the die cool"
+#> date = "2026-09-09"
+#> tags = ["RxInfer", "message passing", "periodic processes", "chip cooling"]
+#> description = "Coordinate four periodic cooling inputs, keep the die-average temperature below 20°C, and use less cooling effort."
 
 using Markdown
 using InteractiveUtils
@@ -22,903 +22,2447 @@ macro bind(def, element)
     #! format: on
 end
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000001
+# ╔═╡ c0011a00-0001-4000-8000-000000000001
 begin
-	using Plots
-	using PlutoUI
-	using LinearAlgebra
-	using SparseArrays
-	using Random
-	using Printf
+    using LinearAlgebra
+    using SparseArrays
+    using Statistics
+    using Printf
+    using RxInfer
+    using ReactiveMP: GaussianCoupling
+    using Plots
+    using PlutoUI
+    using HypertextLiteral
 end
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000002
+# ╔═╡ c0011a00-0001-4000-8000-000000000002
+@htl("""
+<style>
+main { max-width: 1080px; }
+.cooling-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.cooling-channel, .cooling-metric { border: 1px solid #8c9dac66; border-radius: 10px; padding: 14px; }
+.cooling-channel { border-top: 4px solid var(--channel); }
+.cooling-channel h4 { margin: 0 0 10px; color: var(--channel); }
+.cooling-channel label { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 8px 0; }
+.cooling-channel input { width: 82px; }
+.cooling-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
+.cooling-metric strong { display: block; font-size: 1.5em; margin-top: 5px; }
+.cooling-metric small, .cooling-note { opacity: .78; }
+.cooling-verdict { border-left: 4px solid var(--status); padding: 10px 14px; background: #8c9dac15; }
+.cooling-player { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+.cooling-player input { flex: 1; min-width: 80px; }
+.cooling-player output { min-width: 80px; font-variant-numeric: tabular-nums; }
+.cooling-hint { margin: 14px 0; padding: 12px; border: 1px solid #8c9dac66; border-radius: 8px; }
+@media (max-width: 760px) { .cooling-controls, .cooling-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+</style>
+""")
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000003
 md"""
-# Solving systems of equations with distributed probabilistic numerics
+# Keep the die cool
 
-**ProbNum 2026 tutorial — Julia / Pluto edition**
+**Four cooling channels. One temperature limit. How little cooling can you use?**
 
-Probabilistic numerics turns a computation into an inference problem. That move is by now familiar for linear solvers: a Krylov method is a Gaussian agent that has seen ``k`` matrix–vector products and reports a belief about ``x_\ast = A^{-1}b``. It is also, at scale, expensive: the belief lives on all of ``\mathbb{R}^n``, its covariance is dense, and every iteration needs global inner products — a synchronisation barrier across the whole machine.
+Every tile on this chip generates heat continuously. Four cooling segments pulse around its edges. You control **how strongly** each one cools and **when** in the cycle it does so.
 
-This tutorial takes a different route to the same destination. Instead of treating ``A`` as a black box we can only probe, we read its **sparsity pattern as a graphical model**. Solving ``Ax = b`` then becomes *marginal inference* in a Gaussian Markov random field, and the natural algorithm is not conditioning-on-projections but **message passing**: every unknown is an agent, every non-zero ``A_{ij}`` is a channel, and the solver is a conversation between neighbours.
+Your first task is to keep the **average temperature across the die at or below 20°C for the whole cycle**. Then lower the cooling effort without breaking that constraint. The live controls and temperature map are at the end of this notebook.
 
-Nothing is global. No inner products, no barriers, no dense covariance. The belief is *local and anytime*: after ``k`` rounds every node holds a distribution built from exactly the information that has reached it.
-
-| | |
-|:--|:--|
-| **1. Problem specification** | large sparse systems, and why "large" forces "distributed" |
-| **2. Classical numerical approach** | direct factorisation, Jacobi/Gauss–Seidel, conjugate gradients |
-| **3. Probabilistic numerical approach** | ``Ax=b`` as the mean of ``\mathcal{N}(A^{-1}b, A^{-1})`` |
-| **4. Message-passing version** | Gaussian belief propagation, and what it costs |
+This is a companion exercise to the marimo linear-algebra tutorial, adapted from RxInfer's [Solving Linear Systems with Message Passing](https://examples.rxinfer.com/categories/advanced_examples/solving_linear_systems_with_message_passing/).
 """
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000003
+# ╔═╡ c0011a00-0001-4000-8000-000000000004
 md"""
-!!! info "Where this comes from"
-	The construction below is the Gaussian belief propagation (GaBP) solver of Shental, Bickson, Siegel, Wolf & Dolev, *Gaussian belief propagation solver for systems of linear equations* (ISIT 2008; extended version [arXiv:0810.1119](https://arxiv.org/abs/0810.1119)), together with its interior-point descendant (Bickson et al., *Polynomial linear programming with Gaussian belief propagation*, Allerton 2008) and its non-symmetric extension (Fanaskov, *Gaussian belief propagation solvers for nonsymmetric systems of linear equations*, SIAM J. Sci. Comput. 2022).
+## A spatial system driven by a periodic process
 
-	This is the Julia edition of `python/01-linear-systems-by-message-passing.py`; the two notebooks compute the same things and agree to the digits shown.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000004
-TableOfContents(; depth = 2)
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000005
-md"""
-# 1. Problem specification
-
-### Why would anyone solve ``Ax = b``?
-
-Take a tiled accelerator: a few thousand compute tiles on one die, each with its own power counters, its own temperature sensor, and its own ability to throttle its clock. The chip is thermally interesting. A tile that runs hot has to slow down — but so, often, do its neighbours, because heat spreads sideways through the silicon faster than any of them can react. To decide who throttles, the control loop needs the **steady-state temperature of every tile**, and it needs it refreshed faster than the die's thermal time constant.
-
-The physics fits in one line. Tile ``i`` dissipates power ``b_i``; it conducts heat to the four tiles it touches; and it loses heat to the coolant at a rate proportional to how far above ambient it sits. In steady state the three terms balance:
+Let ``x_i(t)`` be tile ``i``'s temperature. Heat flows between neighbouring tiles, leaks to a fixed reference bath, and is removed by the four controlled segments. At each time the balance is
 
 ```math
-\underbrace{c\,x_i}_{\text{lost to the coolant}} \;+\; \underbrace{\sum_{j \sim i}\,(x_i - x_j)}_{\text{conducted to neighbours}} \;=\; \underbrace{b_i}_{\text{dissipated on tile } i}.
+A x(t) = b_0 + M b(t), \qquad A = 100L + 2I, \qquad b_{0,i}=50.
 ```
 
-That is one equation per tile, each involving five unknowns, and it is exactly the five-point discretisation of the screened Poisson equation ``(c - \Delta)u = f``. Stack the tile temperatures into ``x`` and the dissipated powers into ``b`` and the control loop is asking for
+Here ``L`` is the grid's **graph Laplacian**: its diagonal counts actual neighbours, including at the edges. Column ``k`` of ``M`` marks the five cells touched by cooling segment ``k``. The reference bath is 0°C; the conductances and heat-input units are illustrative model parameters. With cooling off, every tile reaches 25°C.
 
-```math
-A x = b, \qquad A \in \mathbb{R}^{n\times n}\ \ \text{symmetric},\ \text{sparse},\ \text{one row per tile.}
-```
+**All time dependence lives in the sources.** A phase advances around a cycle and produces ``b(t)``; the field responds through ``x(t)=A^{-1}(b_0+Mb(t))``. There is no dependence on ``x(t-1)`` and no heat storage. Physically, this is a quasi-steady approximation: the inputs change slowly compared with thermal relaxation. The cycle uses model-time units, not a calibrated chip clock.
 
-Keep the die in mind, because three features of it are what this tutorial is really about — and they are not special to silicon. The same three hold for a power grid, a sensor network, a robot swarm and a domain-decomposed PDE; the die is just the case where they are hardest to argue with.
-
-* **``A`` is sparse and structured — it *is* the floorplan.** Row ``i`` couples ``x_i`` to the handful of tiles it physically touches, and to nothing else. The graph of the matrix is the layout of the chip. (Elsewhere it is a discretised differential operator, a Gauss–Markov model, a network of sensors — same picture.)
-* **The data is already distributed.** ``b_i`` is a number tile ``i``'s own counters measured, and row ``i`` of ``A`` is a property of tile ``i``'s own package. Nothing was ever assembled anywhere. Assembling it means shipping every tile's telemetry to one place — every control period, forever.
-* **Global synchronisation is the bottleneck.** With a few thousand tiles, a barrier costs more than the arithmetic between barriers, and by the time everyone has checked in, the temperature field has moved. Krylov methods need two inner products per step: that is two barriers per step.
-
-So ``n`` is large enough that the interesting quantity is not "how many flops" but **how the work is laid out across the machine** — and, since we are at a probabilistic-numerics meeting, what each tile is entitled to believe while the answer is still arriving.
-
-Our two running examples are the topologies that bracket the difficulty:
-
-* a **chain** — one row of tiles, a tridiagonal system, whose graph is a *tree*;
-* a **2-D lattice** — the whole die, a five-point stencil for ``(c - \Delta)u = f``, whose graph is *loopy*.
-
-The parameter ``c \ge 0`` is the screening (reaction) term — here, the strength of the coupling to the coolant. It already has a physical meaning: it sets how far a hotspot is felt. A well-cooled die screens each hot tile into a small halo; a poorly cooled one lets hotspots talk to each other across the chip. It has a probabilistic meaning too, which we will come back to: ``c`` sets the **correlation length** of the associated Gaussian field, and with it everything about how far information has to travel.
+A negative ``b_k`` represents an active heat sink. These are heat-removal inputs, not prescribed boundary temperatures or a fan model.
 """
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000006
+# ╔═╡ c0011a00-0001-4000-8000-000000000005
 begin
-	"Tridiagonal system: the graph of A is a chain, i.e. a tree."
-	chain_matrix(n; diag = 2.5) =
-		spdiagm(-1 => -ones(n - 1), 0 => fill(diag, n), 1 => -ones(n - 1))
+    "Build the example's grid and four five-cell cooling segments."
+    function make_chip()
+        m = 20
+        n = m * m
+        cell(r, c) = (r - 1) * m + c
+        path = spdiagm(-1 => -ones(m - 1),
+            0 => [1.0; fill(2.0, m - 2); 1.0], 1 => -ones(m - 1))
+        eye = sparse(I, m, m)
+        L = kron(eye, path) + kron(path, eye)
+        A = 100.0L + 2.0I
+        sources = [
+            [cell(1, c) for c in 6:10],
+            [cell(r, m) for r in 6:10],
+            [cell(m, c) for c in 11:15],
+            [cell(r, 1) for r in 11:15],
+        ]
+        M = zeros(n, 4)
+        for (k, cells) in enumerate(sources)
+            M[cells, k] .= 1.0
+        end
+        rows, cols, _ = findnz(triu(A, 1))
+        edges = collect(zip(rows, cols))
+        (; m, n, L, A, M, edges, sources, b0 = fill(50.0, n),
+            names = ("North", "East", "South", "West"),
+            colors = ("#2274a5", "#db6d28", "#199473", "#9760ad"))
+    end
 
-	"Five-point stencil for (c − Δ) on an m×m lattice: the graph is loopy."
-	function grid_matrix(m; screening = 0.0)
-		d = 4.0 + screening
-		T = spdiagm(-1 => -ones(m - 1), 0 => fill(d, m), 1 => -ones(m - 1))
-		band = spdiagm(-1 => -ones(m - 1), 1 => -ones(m - 1))
-		kron(sparse(I, m, m), T) + kron(band, sparse(I, m, m))
-	end
+    to_grid(x, m) = permutedims(reshape(x, m, m))
+    chip = make_chip()
+end;
 
-	"Two localised sources on the m×m lattice — a hot core and a cooling channel."
-	function bump_forcing(m; centers = ((0.3, 0.35), (0.7, 0.65)), width = 0.12)
-		g = ((0:m-1) .+ 0.5) ./ m
-		f = zeros(m, m)
-		for (k, (cx, cy)) in enumerate(centers), i in 1:m, j in 1:m
-			f[i, j] += (isodd(k) ? 1.0 : -0.8) *
-				exp(-((g[i] - cx)^2 + (g[j] - cy)^2) / (2 * width^2))
-		end
-		vec(permutedims(f))              # row-major flatten: node (i,j) ↦ (i-1)m + j
-	end
+# ╔═╡ c0011a00-0001-4000-8000-000000000006
+md"""
+## Solve the field with RxInfer
 
-	"Undo the row-major flatten, for plotting."
-	togrid(v, m) = permutedims(reshape(v, m, m))
+For a symmetric positive definite ``A``, the Gaussian potential
 
-	PAL = (blue = "#2a78d6", black = "#0b0b0b", green = "#008300", orange = "#eb6834",
-	       pink = "#e87ba4", gray = "#898781", violet = "#4a3aa7", white = "#fcfcfb")
+```math
+p(x) \propto \exp\!\left(-\tfrac12 x^\mathsf{T} A x + r^\mathsf{T}x\right)
+```
+
+has mean ``A^{-1}r``. Each tile supplies its diagonal Normal factor; each neighbouring pair supplies a `GaussianCoupling` factor. RxInfer passes local messages to recover the mean.
+
+The grid has loops. Converged means solve the linear system, but the marginal variances are approximate; they are **not temperature-error bars or safety probabilities**. This exercise scores the deterministic mean field.
+"""
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000007
+@model function thermal_linear_system(rhs, A, edges)
+    for i in eachindex(rhs)
+        x[i] ~ Normal(mean = rhs[i] / A[i, i], precision = A[i, i])
+    end
+    for (i, j) in edges
+        x[j] ~ GaussianCoupling(x[i], -A[i, j])
+    end
 end
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000007
+# ╔═╡ c0011a00-0001-4000-8000-000000000008
+begin
+    "Infer one response, refusing an unconverged answer. Runs only during setup."
+    function solve_with_messages(A, edges, rhs; iterations = 1000, tolerance = 1e-9)
+        initialization = @initialization begin
+            μ(x) = NormalMeanVariance(0.0, 1e6)
+        end
+        result = infer(
+            model = thermal_linear_system(A = A, edges = edges),
+            data = (rhs = rhs,), initialization = initialization,
+            returnvars = (x = KeepLast(),), iterations = iterations,
+            options = (limit_stack_depth = 100,), showprogress = false,
+        )
+        values = mean.(result.posteriors[:x])
+        residual = norm(A * values - rhs) / max(norm(rhs), eps(Float64))
+        all(isfinite, values) && residual <= tolerance ||
+            error("RxInfer did not converge (relative residual = $residual). Increase the setup iteration count.")
+        (; values, residual, iterations)
+    end
+
+    "Cache five message-passing responses and independently check the full control range."
+    function prepare_responses(chip)
+        forcing = hcat(chip.b0, chip.M)
+        runs = [solve_with_messages(chip.A, chip.edges, forcing[:, k]) for k in axes(forcing, 2)]
+        responses = reduce(hcat, (run.values for run in runs))
+        reference = cholesky(Symmetric(chip.A)) \ forcing
+        # Each cooling input lies in [-600, 0]. Bound the error for any combination.
+        discrepancy = abs.(responses - reference)
+        control_error_bound = maximum(discrepancy[:, 1] + 600 .* vec(sum(discrepancy[:, 2:5]; dims = 2)))
+        control_error_bound <= 1e-6 || error("Response error exceeds the scoring tolerance: $control_error_bound °C")
+        (; background = responses[:, 1], influence = responses[:, 2:5],
+            residuals = [run.residual for run in runs], control_error_bound)
+    end
+end;
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000009
+response_cache = prepare_responses(chip);
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000010
 md"""
-The picture to keep in mind for the rest of the tutorial: **the matrix *is* a graph**. Node ``i`` is the unknown ``x_i``; there is an edge ``\{i,j\}`` whenever ``A_{ij} \neq 0``. Everything the solver will do is expressible as nodes talking along those edges.
+Because the model is linear, five solves are enough: one for the background and one for each cooling segment. Every later field is the linear combination
+
+```math
+x(t)=x_0+\sum_{k=1}^{4} h_k b_k(t), \qquad Ax_0=b_0,\quad Ah_k=M_{:,k}.
+```
+
+The response fields above are computed with RxInfer and checked against a sparse direct solve. Editing controls or playing the animation only combines those cached fields.
+
+**Setup check:** largest relative residual **$(@sprintf("%.2e", maximum(response_cache.residuals)))**; worst-case field discrepancy over the allowed controls **$(@sprintf("%.2e", response_cache.control_error_bound))°C**.
 """
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000008
+# ╔═╡ c0011a00-0001-4000-8000-000000000012
+begin
+    "Validated periodic source parameters; phases are entered in degrees."
+    function cooling_settings(amplitudes, phases; period = 40.0)
+        length(amplitudes) == length(phases) == 4 || throw(ArgumentError("Provide four amplitudes and four phases."))
+        all(a -> isfinite(a) && 0 <= a <= 600, amplitudes) || throw(ArgumentError("Amplitudes must be finite and between 0 and 600."))
+        all(isfinite, phases) || throw(ArgumentError("Phases must be finite."))
+        isfinite(period) && period > 0 || throw(ArgumentError("The period must be positive."))
+        (; amplitudes = Float64.(amplitudes), phases = deg2rad.(mod.(Float64.(phases), 360)), period = Float64(period))
+    end
+
+    cooling_inputs(t, settings) = -settings.amplitudes .* (1 .+ sin.(2π * t / settings.period .+ settings.phases)) ./ 2
+
+    "x(t) = offset + sine sin(ωt) + cosine cos(ωt), with no temporal state in x."
+    function temperature_components(cache, settings)
+        half = settings.amplitudes ./ 2
+        (; offset = cache.background - cache.influence * half,
+            sine = -cache.influence * (half .* cos.(settings.phases)),
+            cosine = -cache.influence * (half .* sin.(settings.phases)))
+    end
+
+    temperature_at(t, components, period) = components.offset +
+        components.sine * sin(2π * t / period) + components.cosine * cos(2π * t / period)
+
+    "Score the complete continuous cycle, independently of plotted time samples."
+    function schedule_metrics(chip, components, settings; limit = 20.0, tolerance = 1e-6)
+        center = mean(components.offset)
+        radius = hypot(mean(components.sine), mean(components.cosine))
+        peak = center + radius
+        # Ignore only the same 1e-6 °C numerical allowance used by the verdict.
+        fraction_above = if radius <= eps(Float64) * max(1.0, abs(center))
+            center > limit + tolerance ? 1.0 : 0.0
+        else
+            q = (limit + tolerance - center) / radius
+            q >= 1 ? 0.0 : q <= -1 ? 1.0 : acos(q) / π
+        end
+        sizes = length.(chip.sources)
+        effort = settings.period / 2 * dot(sizes, settings.amplitudes)
+        hottest = maximum(components.offset + hypot.(components.sine, components.cosine))
+        coldest = minimum(components.offset - hypot.(components.sine, components.cosine))
+        (; peak, cycle_average = center, trough = center - radius, hottest, coldest,
+            effort, fraction_above, feasible = peak <= limit + tolerance, limit, tolerance)
+    end
+
+    function sample_schedule(components, settings; samples = 241)
+        times = collect(range(0, 2settings.period; length = samples))
+        fields = reduce(hcat, (temperature_at(t, components, settings.period) for t in times))
+        inputs = reduce(hcat, (cooling_inputs(t, settings) for t in times))
+        (; times, fields, inputs, averages = vec(mean(fields; dims = 1)))
+    end
+end;
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000016
+begin
+    "A single Pluto bond for scrubbing and playback, with a deterministic script default."
+    struct CyclePlayer
+        duration::Float64
+        steps::Int
+    end
+    Base.get(::CyclePlayer) = 0.0
+    function Base.show(io::IO, mime::MIME"text/html", player::CyclePlayer)
+        show(io, mime, @htl("""
+        <div class="cooling-player">
+            <button type="button" aria-label="Play or pause the cooling cycle">Play</button>
+            <input type="range" aria-label="Time within two cooling cycles" min="0" max=$(player.steps) step="1" value="0">
+            <output>t = 0.00</output>
+            <script>
+                const root = currentScript.parentElement;
+                const slider = root.querySelector('input');
+                const button = root.querySelector('button');
+                const output = root.querySelector('output');
+                const duration = $(player.duration);
+                const steps = $(player.steps);
+                let timer = null;
+                // Pluto also assigns the saved bond value when a browser reconnects.
+                Object.defineProperty(root, 'value', {
+                    get: () => Number(slider.value) * duration / steps,
+                    set: (value) => {
+                        const time = Number(value);
+                        slider.value = Number.isFinite(time) ? Math.round(Math.max(0, Math.min(duration, time)) * steps / duration) : 0;
+                        output.textContent = 't = ' + (Number(slider.value) * duration / steps).toFixed(2);
+                    }
+                });
+                root.value = 0;
+                const emit = () => {
+                    root.value = Number(slider.value) * duration / steps;
+                    root.dispatchEvent(new CustomEvent('input'));
+                };
+                slider.addEventListener('input', (event) => { event.stopPropagation(); emit(); });
+                button.addEventListener('click', () => {
+                    if (timer !== null) {
+                        clearInterval(timer); timer = null; button.textContent = 'Play';
+                    } else {
+                        button.textContent = 'Pause';
+                        timer = setInterval(() => {
+                            slider.value = (Number(slider.value) + 1) % (steps + 1);
+                            emit();
+                        }, 250);
+                    }
+                });
+                invalidation.then(() => { if (timer !== null) clearInterval(timer); });
+            </script>
+        </div>
+        """))
+    end
+end;
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000019
+function plot_dashboard(chip, components, settings, trajectory, metrics, t)
+    field = temperature_at(t, components, settings.period)
+    p_field = heatmap(to_grid(field, chip.m); color = cgrad(:thermal), clims = (-5, 25),
+        aspect_ratio = :equal, yflip = true, xlabel = "column", ylabel = "row",
+        xlims = (0.5, chip.m + 0.5), ylims = (0.5, chip.m + 0.5),
+        title = @sprintf("Temperature at t = %.2f", t), legend = false,
+        colorbar = true, colorbar_title = "°C")
+    for (k, cells) in enumerate(chip.sources)
+        rows = [(i - 1) ÷ chip.m + 1 for i in cells]
+        cols = [(i - 1) % chip.m + 1 for i in cells]
+        plot!(p_field, cols, rows; color = chip.colors[k], linewidth = 6, label = false)
+    end
+
+    p_inputs = plot(; title = "Four periodic cooling inputs", xlabel = "model time", ylabel = "bₖ(t) · cooling ≤ 0",
+        xlims = (0, 2settings.period), ylims = (-620, 20), legend = :bottomleft, legend_columns = 2)
+    for k in 1:4
+        plot!(p_inputs, trajectory.times, trajectory.inputs[k, :]; color = chip.colors[k], linewidth = 2, label = chip.names[k])
+    end
+    vline!(p_inputs, [t]; color = :gray45, linewidth = 1, linestyle = :dash, label = false)
+
+    p_average = plot(trajectory.times, trajectory.averages; color = "#2274a5", linewidth = 2.5,
+        label = "die average", xlabel = "model time", ylabel = "temperature (°C)",
+        title = "Keep this entire curve at or below 20°C", xlims = (0, 2settings.period),
+        ylims = (minimum((9.0, metrics.trough - 0.5)), 26), legend = :bottomright)
+    # Shade only the part of the average curve above the threshold.
+    plot!(p_average, trajectory.times, max.(trajectory.averages, metrics.limit);
+        fillrange = metrics.limit, fillalpha = 0.2, color = "#cf5735", linewidth = 0, label = "above limit")
+    hline!(p_average, [metrics.limit]; color = "#cf5735", linewidth = 1.5, linestyle = :dash, label = "20°C limit")
+    vline!(p_average, [t]; color = :gray45, linewidth = 1, linestyle = :dash, label = false)
+    scatter!(p_average, [t], [mean(field)]; color = "#2274a5", markersize = 5, label = false)
+    plot(p_field, p_inputs, p_average; layout = @layout([a b; c{0.36h}]),
+        size = (1000, 650), margin = 4Plots.mm, titlefontsize = 11, guidefontsize = 10,
+        tickfontsize = 9, legendfontsize = 9, fmt = :svg)
+end;
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000011
+md"""
+## Design four cooling schedules
+
+Each segment follows the same period ``P=40``:
+
+```math
+b_k(t)=-\frac{a_k}{2}\left[1+\sin\!\left(\frac{2\pi t}{P}+\phi_k\right)\right].
+```
+
+- **Amplitude** ``a_k`` is the maximum cooling strength per affected cell. Zero turns a channel off.
+- **Phase** ``\phi_k`` shifts the pulse around the cycle. A quarter-cycle shift is 90°.
+
+The channel always cools or is off: ``-a_k\leq b_k(t)\leq0``. Positive background heating remains on every tile, including tiles touched by a cooling segment.
+
+**Try this in two stages.** First keep all amplitudes at 500 and change only the phases until the die-average curve stays at or below 20°C. Then lower the amplitudes to reduce effort while preserving that result. Judge the **whole curve**, not just its average over time.
+"""
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000013
+@htl("""
+<div class="cooling-controls">
+    <section class="cooling-channel" style="--channel:#2274a5">
+        <h4>1 · North</h4>
+        <label>Amplitude $(@bind amplitude_north NumberField(0:10:600; default = 500))</label>
+        <label>Phase (°) $(@bind phase_north NumberField(0:5:355; default = 0))</label>
+    </section>
+    <section class="cooling-channel" style="--channel:#db6d28">
+        <h4>2 · East</h4>
+        <label>Amplitude $(@bind amplitude_east NumberField(0:10:600; default = 500))</label>
+        <label>Phase (°) $(@bind phase_east NumberField(0:5:355; default = 0))</label>
+    </section>
+    <section class="cooling-channel" style="--channel:#199473">
+        <h4>3 · South</h4>
+        <label>Amplitude $(@bind amplitude_south NumberField(0:10:600; default = 500))</label>
+        <label>Phase (°) $(@bind phase_south NumberField(0:5:355; default = 0))</label>
+    </section>
+    <section class="cooling-channel" style="--channel:#9760ad">
+        <h4>4 · West</h4>
+        <label>Amplitude $(@bind amplitude_west NumberField(0:10:600; default = 500))</label>
+        <label>Phase (°) $(@bind phase_west NumberField(0:5:355; default = 0))</label>
+    </section>
+</div>
+""")
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000014
+settings = cooling_settings(
+    [amplitude_north, amplitude_east, amplitude_south, amplitude_west],
+    [phase_north, phase_east, phase_south, phase_west]);
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000015
+begin
+    components = temperature_components(response_cache, settings)
+    metrics = schedule_metrics(chip, components, settings)
+    trajectory = sample_schedule(components, settings)
+end;
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000017
+@bind display_time CyclePlayer(80.0, 240)
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000018
 let
-	m = 6
-	A = grid_matrix(m)
-	Ao = A - spdiagm(0 => diag(A))
-	rows, cols, _ = findnz(Ao)
-	xy = [((i - 1) ÷ m, (i - 1) % m) for i in 1:m^2]
-
-	plt = plot(; aspect_ratio = :equal, legend = :top, grid = false,
-		axis = false, ticks = false, size = (620, 460),
-		title = "The graph of A: $(m)×$(m) lattice, $(nnz(A)) non-zeros")
-	first_edge = true
-	for e in eachindex(rows)
-		rows[e] < cols[e] || continue
-		p, q = xy[rows[e]], xy[cols[e]]
-		plot!(plt, [p[2], q[2]], [-p[1], -q[1]]; color = PAL.gray, lw = 1.5,
-			label = first_edge ? "edges  (Aᵢⱼ ≠ 0)" : "")
-		first_edge = false
-	end
-	scatter!(plt, [p[2] for p in xy], [-p[1] for p in xy];
-		color = PAL.blue, ms = 9, msw = 1.5, msc = PAL.white, label = "unknowns  xᵢ")
-	plt
+    current_average = mean(temperature_at(display_time, components, settings.period))
+    status_color = metrics.feasible ? "#168564" : "#cf5735"
+    status_text = metrics.feasible ? "Within the limit for the whole cycle" : "The die average exceeds 20°C during this cycle"
+    @htl("""
+    <div class="cooling-verdict" style=$("--status:" * status_color)>
+        <strong>$(status_text)</strong><br>
+        $(@sprintf("%.1f%%", 100metrics.fraction_above)) of the cycle above the limit ·
+        cycle-average temperature $(@sprintf("%.2f°C", metrics.cycle_average))
+    </div>
+    <div class="cooling-metrics">
+        <div class="cooling-metric"><small>Die average now · t = $(@sprintf("%.2f", display_time))</small><strong>$(@sprintf("%.2f°C", current_average))</strong></div>
+        <div class="cooling-metric"><small>Highest die average · full cycle</small><strong>$(@sprintf("%.2f°C", metrics.peak))</strong></div>
+        <div class="cooling-metric"><small>Hottest tile · full cycle</small><strong>$(@sprintf("%.2f°C", metrics.hottest))</strong></div>
+        <div class="cooling-metric"><small>Cooling effort · per cycle</small><strong>$(@sprintf("%.0f", metrics.effort))</strong><small>model effort units</small></div>
+    </div>
+    """)
 end
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000009
+# ╔═╡ c0011a00-0001-4000-8000-000000000020
+dashboard = plot_dashboard(chip, components, settings, trajectory, metrics, display_time)
+
+# ╔═╡ c0011a00-0001-4000-8000-000000000021
 md"""
-# 2. Classical numerical approach
+**An average can hide a hotspot.** The task constrains the spatial average across all 400 tiles at every time. The hottest-tile metric is a separate diagnostic: a passing schedule does not imply every tile is below 20°C. The heatmap uses the same colour scale throughout; values outside it saturate.
 
-Three families, three different bargains.
-
-**Direct solvers.** Factorise ``A = LL^\top`` and substitute. Exact in exact arithmetic, and for the 2-D lattice the factor ``L`` suffers *fill-in*: a banded matrix with ``O(n)`` non-zeros produces a factor with ``O(n^{3/2})`` of them. The graph view explains why — eliminating a node connects all of its neighbours to each other, so the graph densifies as you go.
-
-**Stationary iterative methods.** Split ``A = D + R`` and iterate
+Cooling effort counts the heat removed by all five cells in each segment:
 
 ```math
-x^{(t+1)} = D^{-1}\bigl(b - R\,x^{(t)}\bigr) \qquad \text{(Jacobi)},
+E=\int_0^P \sum_{k=1}^{4}|S_k|[-b_k(t)]\,dt
+  =\frac{P}{2}\sum_{k=1}^{4}|S_k|a_k.
 ```
 
-i.e. *each unknown solves its own equation, assuming its neighbours are right*. This is already local and distributed, as node ``i`` only needs ``x_j`` for its neighbours. Gauss–Seidel is the same update with values used as soon as they are available (asynchronous rather than synchronous). Both are simple and both converge slowly, at a rate set by the spectral radius of the iteration matrix.
-
-**Krylov methods.** Conjugate gradients minimises the ``A``-norm error over the Krylov space and converges in ``O(\sqrt{\kappa}\,\log \varepsilon^{-1})`` iterations, which is far better. The price is that every step needs ``r^\top r`` and ``p^\top Ap``, two inner products over all ``n`` entries. On a distributed machine every processor must wait for every other.
-
-All three return a vector ``x_k`` plus an error bound in terms of quantities (``\kappa``, ``\|x_\ast\|``) that are exactly as unknown as the solution.
+This is a **model cooling-effort measure**. Electrical energy would additionally require an actuator-efficiency model. The period is fixed so schedules are compared over the same duration. The score checks the full continuous cycle, allowing ``10^{-6}``°C for numerical error; it does not just check the plotted samples.
 """
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000010
-begin
-	"Jacobi (kind = :jacobi) or Gauss–Seidel (kind = :gs) iterates, from x = 0."
-	function stationary(A, b, iters; kind = :jacobi)
-		d = diag(A)
-		x = zeros(length(b))
-		out = [copy(x)]
-		for _ in 1:iters
-			if kind == :jacobi
-				x = x + (b - A * x) ./ d           # every node solves its own row
-			else
-				for i in eachindex(x)              # ... using whatever has arrived
-					x[i] += (b[i] - dot(A[i, :], x)) / d[i]
-				end
-			end
-			push!(out, copy(x))
-		end
-		out
-	end
+# ╔═╡ c0011a00-0001-4000-8000-000000000022
+@htl("""
+<details class="cooling-hint">
+<summary>Hint · how can timing help without extra cooling?</summary>
+$(md"""
+At fixed amplitude, shifting a sinusoid preserves its integral over a complete cycle. It therefore preserves both cooling effort and the cycle-average die temperature. It can still change **how high the instantaneous die average rises**.
 
-	"Textbook CG from x = 0, returning every iterate."
-	function conjugate_gradients(A, b, iters)
-		x = zeros(length(b))
-		r = b - A * x
-		p = copy(r)
-		rr = dot(r, r)
-		out = [copy(x)]
-		for _ in 1:iters
-			Ap = A * p
-			α = rr / dot(p, Ap)
-			x = x + α * p
-			r = r - α * Ap
-			rr_new = dot(r, r)
-			p = r + (rr_new / rr) * p
-			rr = rr_new
-			push!(out, copy(x))
-		end
-		out
-	end
-end
+Try separating the strongest parts of the four pulses. What happens when two otherwise equal channels are half a cycle apart? After making the curve flat, lower the amplitudes together until it just touches the limit.
+""")
+</details>
+<details class="cooling-hint">
+<summary>After experimenting · a benchmark and a lower bound</summary>
+$(md"""
+With amplitudes **500, 500, 500, 500** and phases **0°, 90°, 180°, 270°**, the die average is constant at **18.75°C**. Reducing all four amplitudes to **400** makes it **20°C**, using **20% less effort**: 160,000 model effort units per cycle instead of 200,000.
 
-# ╔═╡ aabbccdd-0000-4000-8000-000000000011
-md"""
-# 3. Probabilistic numerical approach
-
-The usual probabilistic reading of a linear solver puts a Gaussian prior on ``x``, treats each matrix–vector product as a linear observation ``s_i^\top A x_\ast = s_i^\top b``, and conditions. It inherits a dense ``n \times n`` covariance and a global policy for choosing ``s_i``.
-
-For symmetric positive definite ``A``, define
+Why is that optimal for this particular task? Summing all tile equations cancels the neighbour-to-neighbour heat flows, leaving
 
 ```math
-q(x) = \tfrac12 x^\top A x - b^\top x, \qquad
-p(x) \;\propto\; \exp\bigl(-q(x)\bigr) \;=\; \exp\bigl(-\tfrac12 x^\top A x + b^\top x\bigr).
+\overline{x}(t)=25+\frac{1}{160}\sum_{k=1}^{4}b_k(t).
 ```
 
-Completing the square gives
-
-```math
-p(x) \;=\; \mathcal{N}\bigl(x;\ A^{-1}b,\ A^{-1}\bigr).
-```
-
-So the solution vector *is* the mean of a Gaussian whose **precision matrix is ``A`` itself** (Shental et al. 2008, Prop. 8). Solving a linear system and computing the marginal means of a Gaussian Markov random field are the same problem:
-
-| linear algebra | probabilistic inference |
-|:--|:--|
-| matrix ``A`` | precision (information) matrix |
-| right-hand side ``b`` | natural-parameter mean ``A\mu`` |
-| sparsity pattern of ``A`` | conditional independence graph |
-| solution ``x_\ast = A^{-1}b`` | vector of marginal means ``\mu_i`` |
-| diagonal of ``A^{-1}`` | marginal variances ``\sigma_i^2`` |
-| ``1/A_{ii}`` | *conditional* variance of ``x_i`` given its neighbours |
-
-This leads us to two observations.
-
-1. **The uncertainty is free-standing.** We did not choose a prior and we are not modelling rounding error. The Gaussian is a re-encoding of the problem itself, and its marginal variances ``(A^{-1})_{ii}`` are the quantity a statistician would want anyway when ``A`` is a posterior precision (Gaussian process regression, GMRF models, Kalman smoothing, bundle adjustment).
-
-   Back on the die, that quantity is not a statistical abstraction either: ``(A^{-1})_{ij}`` is the temperature rise at tile ``i`` per unit of power dissipated at tile ``j`` — the **thermal impedance** of the chip, which is what a thermal engineer would have measured. Its diagonal, the marginal variance, is how hot tile ``i`` gets from its own watt *once the rest of the die has been allowed to warm up in response*. The conditional variance ``1/A_{ii}`` is the same number computed with every neighbour pinned to ambient: the answer a tile would give if it believed it were the only warm thing on the chip. The gap between those two is real, physical, and — as §4 will show — is precisely what the messages carry.
-
-2. **Locality is now structural.** ``A_{ij} = 0`` means ``x_i \perp x_j \mid x_{\text{rest}}``. The graph of the matrix is the conditional independence graph of the belief, so an inference algorithm that only exchanges information along edges is *automatically* a solver that only communicates along the sparsity pattern.
-
-The last row of the table is the seed of the entire algorithm. A node that knows only its own equation knows the conditional variance ``1/A_{ii}``; to upgrade it to the marginal variance ``(A^{-1})_{ii}`` it has to hear from the rest of the graph.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000012
-let
-	A = [3.0 1.4; 1.4 2.0]
-	b = [1.0, 2.0]
-	x = A \ b
-	g = range(-1.2, 1.8; length = 160)
-	q(u, v) = 0.5 * (A[1,1]*u^2 + 2*A[1,2]*u*v + A[2,2]*v^2) - (b[1]*u + b[2]*v)
-
-	plt = contourf(g, g, (u, v) -> exp(-(q(u, v) - q(x[1], x[2])));
-		levels = 18, linewidth = 0, color = :blues, colorbar = false,
-		aspect_ratio = :equal, size = (560, 440),
-		xlabel = "x₁", ylabel = "x₂", legend = :topleft,
-		title = "p(x) ∝ exp(−½ xᵀA x + bᵀx) = 𝒩(A⁻¹b, A⁻¹)")
-	scatter!(plt, [x[1]], [x[2]]; m = :star5, ms = 11, color = PAL.orange,
-		msc = PAL.white, msw = 1, label = "solution = mean  A⁻¹b")
-	plt
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000013
-md"""
-# 4. The message-passing version
-
-## 4.1 The factor graph
-
-Write the density as a product of one factor per node and one per edge:
-
-```math
-p(x) \;\propto\; \prod_{i} \phi_i(x_i) \prod_{\{i,j\}} \psi_{ij}(x_i,x_j),
-\qquad
-\phi_i(x_i) = \exp\!\bigl(b_i x_i - \tfrac12 A_{ii} x_i^2\bigr),
-\qquad
-\psi_{ij}(x_i,x_j) = \exp(-x_i A_{ij} x_j).
-```
-
-The self-factor ``\phi_i`` is row ``i``'s own equation — it is ``\mathcal{N}(x_i;\, b_i/A_{ii},\, 1/A_{ii})``, exactly the "solve my equation ignoring the coupling" belief that Jacobi starts from. The edge factor ``\psi_{ij}`` is the coupling. **Every quantity in the factor graph is an entry of ``A`` or ``b`` that node ``i`` already owns.**
-
-## 4.2 The messages
-
-Sum-product on this graph: the message from ``i`` to ``j`` is
-
-```math
-m_{i\to j}(x_j) \;\propto\; \int \psi_{ij}(x_i,x_j)\, \phi_i(x_i) \!\!\prod_{k \in N(i)\setminus j}\!\! m_{k\to i}(x_i)\, \mathrm{d}x_i .
-```
-
-Products of Gaussians are Gaussian and Gaussian integrals are Gaussian, so each message is carried by **two scalars**: a precision ``P_{ij}`` and a mean ``\mu_{ij}``. Writing ``P_{i\setminus j}`` for the precision node ``i`` has accumulated *excluding* what ``j`` told it,
-
-```math
-P_{i\setminus j} = A_{ii} + \!\!\sum_{k\in N(i)\setminus j}\!\! P_{ki},
-\qquad
-\mu_{i\setminus j} = \frac{1}{P_{i\setminus j}}\Bigl(b_i + \!\!\sum_{k\in N(i)\setminus j}\!\! P_{ki}\mu_{ki}\Bigr),
-```
-
-the outgoing message is
-
-```math
-P_{ij} = -\frac{A_{ij}^2}{P_{i\setminus j}}, \qquad
-\mu_{ij} = \frac{P_{i\setminus j}\,\mu_{i\setminus j}}{A_{ij}}
-```
-
-and the belief at node ``i``, using *all* incoming messages, is
-
-```math
-P_i = A_{ii} + \sum_{k\in N(i)} P_{ki},
-\qquad
-\mu_i = \frac{1}{P_i}\Bigl(b_i + \sum_{k\in N(i)} P_{ki}\mu_{ki}\Bigr),
-\qquad
-x_i \approx \mu_i, \quad (A^{-1})_{ii} \approx 1/P_i .
-```
-
-Note the sign: ``P_{ij} = -A_{ij}^2 / P_{i\setminus j}`` is **negative**. Messages are not probability distributions — they are *information updates*, and what a neighbour tells you here is "you are less certain than you thought": each message pushes a node's belief from the conditional variance ``1/A_{ii}`` towards the marginal variance ``(A^{-1})_{ii} \ge 1/A_{ii}``.
-
-Everything on the right-hand side is indexed by ``i`` and its neighbours. There is no ``n`` anywhere in the update.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000014
-"""
-Directed off-diagonal edges of a structurally symmetric sparse matrix.
-
-Returns `(src, dst, a, rev)`: `a[e] = A[src[e], dst[e]]`, and `rev[e]` is the index of
-the reverse edge of `e` — the only bookkeeping the "exclude what j told me" rule needs.
-"""
-function edge_list(A::SparseMatrixCSC)
-	Ao = dropzeros(A - spdiagm(0 => diag(A)))
-	src, dst, a = findnz(Ao)
-	pos = Dict((src[e], dst[e]) => e for e in eachindex(src))
-	rev = [pos[(dst[e], src[e])] for e in eachindex(src)]
-	src, dst, a, rev
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000015
-"""
-Gaussian belief propagation for A x = b  (Shental et al. 2008, Algorithms 1–2).
-
-Messages live on directed edges and carry two scalars: a precision `P` and a
-precision-weighted mean `W = P·μ`.  Every update touches one node and its neighbours only.
-
-* `schedule = :parallel` — flooding; all nodes send simultaneously (à la Jacobi)
-* `schedule = :serial`   — sweep nodes, using messages as soon as they arrive (à la Gauss–Seidel)
-* `jacobi = true`        — clamp the precision messages to zero, which *is* Jacobi (Prop. 16)
-"""
-function gabp(A, b; iters = 500, tol = 1e-10, damping = 0.0,
-              schedule = :parallel, jacobi = false, record = false)
-	n = size(A, 1)
-	Pii = Vector{Float64}(diag(A))          # self-factor precision
-	Wii = Vector{Float64}(b)                # self-factor  P·μ  =  A_ii · (b_i/A_ii)
-	src, dst, a, rev = edge_list(A)
-	ne = length(a)
-	P, W = zeros(ne), zeros(ne)             # message precision, and precision × mean
-	bnorm = norm(b)
-	inbox  = [findall(==(i), dst) for i in 1:n]
-	outbox = [findall(==(i), src) for i in 1:n]
-
-	res, mus, sds = Float64[], Vector{Float64}[], Vector{Float64}[]
-	SP, SW, mu = copy(Pii), copy(Wii), zeros(n)
-	for _ in 1:iters
-		if schedule == :parallel
-			SP .= Pii; SW .= Wii
-			for e in 1:ne
-				SP[dst[e]] += P[e]; SW[dst[e]] += W[e]
-			end
-			Pn, Wn = similar(P), similar(W)
-			for e in 1:ne
-				P_ex = SP[src[e]] - (jacobi ? 0.0 : P[rev[e]])   # exclude what j told i
-				W_ex = SW[src[e]] - (jacobi ? 0.0 : W[rev[e]])
-				Pn[e] = jacobi ? 0.0 : -a[e]^2 / P_ex
-				Wn[e] = -a[e] * (W_ex / P_ex)
-			end
-			@. P = (1 - damping) * Pn + damping * P
-			@. W = (1 - damping) * Wn + damping * W
-		else
-			for i in 1:n
-				sp = Pii[i] + sum(@view P[inbox[i]]; init = 0.0)
-				sw = Wii[i] + sum(@view W[inbox[i]]; init = 0.0)
-				for e in outbox[i]
-					P_ex = sp - (jacobi ? 0.0 : P[rev[e]])
-					W_ex = sw - (jacobi ? 0.0 : W[rev[e]])
-					Pn = jacobi ? 0.0 : -a[e]^2 / P_ex
-					Wn = -a[e] * (W_ex / P_ex)
-					P[e] = (1 - damping) * Pn + damping * P[e]
-					W[e] = (1 - damping) * Wn + damping * W[e]
-				end
-			end
-		end
-
-		SP .= Pii; SW .= Wii
-		for e in 1:ne
-			SP[dst[e]] += P[e]; SW[dst[e]] += W[e]
-		end
-		mu = SW ./ SP
-		r = norm(A * mu - b) / bnorm
-		push!(res, r)
-		if record
-			push!(mus, copy(mu)); push!(sds, sqrt.(abs.(1.0 ./ SP)))
-		end
-		if !isfinite(r) || r > 1e10
-			return (; mu, var = 1.0 ./ SP, res, mus, sds,
-			          iters = length(res), converged = false)
-		end
-		r < tol && break
-	end
-	(; mu, var = 1.0 ./ SP, res, mus, sds,
-	   iters = length(res), converged = res[end] < tol)
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000016
-md"""
-That is the whole solver: no factorisation, no inner products, no ``n``-dimensional linear algebra. The `inbox` sums stand in for what would be, on real hardware, each node summing its own mailbox.
-
-## 4.3 Sanity check on a 3×3 system
-
-The toy example from Shental et al. (their eq. 47) is deliberately nasty: symmetric but **indefinite**, so "the Gaussian" is not a probability distribution at all. The algebra does not care.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000017
-begin
-	A_toy = sparse([1.0 -2.0 3.0; -2.0 1.0 0.0; 3.0 0.0 1.0])
-	b_toy = [-6.0, 0.0, 2.0]
-	toy_bp = gabp(A_toy, b_toy; iters = 200)
-	toy_exact = Matrix(A_toy) \ b_toy
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000018
-md"""
-| | ``x_1`` | ``x_2`` | ``x_3`` |
-|:--|--:|--:|--:|
-| GaBP after $(toy_bp.iters) rounds | $(@sprintf("%.6f", toy_bp.mu[1])) | $(@sprintf("%.6f", toy_bp.mu[2])) | $(@sprintf("%.6f", toy_bp.mu[3])) |
-| `A \\ b` | $(@sprintf("%.6f", toy_exact[1])) | $(@sprintf("%.6f", toy_exact[2])) | $(@sprintf("%.6f", toy_exact[3])) |
-
-Eigenvalues of ``A``: $(join([@sprintf("%.2f", v) for v in eigvals(Matrix(A_toy))], ", ")) — not positive definite, and yet exact.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000019
-md"""
-## 4.4 Trees: message passing *is* Gaussian elimination
-
-If the graph of ``A`` has no cycles, belief propagation is exact — in the means *and* in the variances — after at most as many rounds as the diameter of the tree (and in practice sooner: the messages stop changing once information has crossed a correlation length, not the whole graph). Shental et al. (Prop. 14) make the correspondence precise: on a tree, the message sweep from the leaves inward performs exactly the row operations of Gaussian elimination (``P_{i\setminus j}`` is the updated pivot ``A_{ii} - \sum_l A_{li}^2/A_{ll}``), and reading off the marginals is forward substitution.
-
-A tridiagonal system is the simplest instance: GaBP on a chain **is** the Thomas algorithm, re-derived as inference. Below, both the solution and the marginal variances ``(A^{-1})_{ii}`` come out to machine precision — and the variances are the diagonal of a dense inverse we never formed.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000020
-begin
-	n_chain = 80
-	A_chain = chain_matrix(n_chain; diag = 2.5)
-	b_chain = randn(Xoshiro(2026), n_chain)
-	chain_bp = gabp(A_chain, b_chain; iters = 2000, tol = 1e-13)
-	chain_x = Matrix(A_chain) \ b_chain
-	chain_v = diag(inv(Matrix(A_chain)))
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000021
-let
-	sd = sqrt.(chain_bp.var)
-	plt = plot(1:n_chain, chain_bp.mu; ribbon = 2 .* sd, fillalpha = 0.15,
-		color = PAL.blue, lw = 2, label = "GaBP marginal means  (± 2σ)",
-		xlabel = "node i", ylabel = "xᵢ", legend = :top, size = (680, 400),
-		title = "Chain of $(n_chain) unknowns — converged in $(chain_bp.iters) rounds")
-	plot!(plt, 1:n_chain, chain_x; color = PAL.black, lw = 1.5, ls = :dash,
-		label = "exact solution")
-	plt
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000022
-md"""
-| | max abs. error |
-|:--|--:|
-| means vs `A \\ b` | $(@sprintf("%.2e", maximum(abs.(chain_bp.mu .- chain_x)))) |
-| variances vs `diag(inv(A))` | $(@sprintf("%.2e", maximum(abs.(chain_bp.var .- chain_v)))) |
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000023
-md"""
-## 4.5 What "belief" means before convergence
-
-Run the message passing for ``k`` rounds and stop. What is node ``i`` holding?
-
-The marginal of the **computation tree of depth ``k``** rooted at ``i``. This is the graph you get by unrolling the neighbourhood of ``i`` for ``k`` hops. That is the sub-problem whose information has physically reached node ``i`` in ``k`` rounds of communication. So the belief at iteration ``k`` is not a heuristic error estimate; it is the *exact posterior of the part of the problem the node has seen so far*, and the sequence interpolates from
-
-```math
-\text{iteration } 0:\quad \mathcal{N}\bigl(b_i/A_{ii},\; 1/A_{ii}\bigr)
-\qquad\text{(the conditional: "my equation, neighbours assumed known")}
-```
-
-to
-
-```math
-\text{convergence}:\quad \mathcal{N}\bigl((A^{-1}b)_i,\; (A^{-1})_{ii}\bigr)
-\qquad\text{(the marginal: the whole system accounted for).}
-```
-
-Each node's uncertainty therefore *grows* as information arrives. The early over-confidence of "I'll just solve my own row" is corrected by neighbours. The belief is **local and anytime**: every node has one at every round, computed from the messages it happens to hold, with no global quantity ever assembled.
-
-In the story of §1: at round 0 every tile reports the temperature it would reach if it were the only warm thing on the die, and reports it with the confidence of the isolated. Round by round it learns that its neighbours are warm, that theirs are, and that it sits in a hot region of the chip — its estimate rises and its stated certainty falls. After ``k`` rounds a tile has accounted for exactly the ``k``-hop patch of silicon around it. **That patch is what its belief describes** — not, as the box below insists, how wrong its number is.
-
-Watch the front of information sweep across the lattice.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000024
-begin
-	m_grid = 24                       # 24 × 24 lattice, n = 576 unknowns
-	screen_grid = 0.4
-	A_grid = grid_matrix(m_grid; screening = screen_grid)
-	b_grid = bump_forcing(m_grid)
-	x_grid = Matrix(A_grid) \ b_grid
-	grid_bp = gabp(A_grid, b_grid; iters = 400, tol = 1e-12, record = true)
-	var_grid = diag(inv(Matrix(A_grid)))         # reference marginals (dense, n = 576)
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000025
-md"""
-message-passing rounds ``k``: $(@bind round_k Slider(1:min(60, grid_bp.iters), default = 3, show_value = true))
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000026
-let
-	μ = togrid(grid_bp.mus[round_k], m_grid)
-	sd = togrid(grid_bp.sds[round_k], m_grid)
-	sd_true = togrid(sqrt.(var_grid), m_grid)
-
-	h1 = heatmap(μ; color = :RdBu, clims = (minimum(x_grid), maximum(x_grid)),
-		yflip = true, aspect_ratio = :equal, axis = false, ticks = false,
-		title = "belief mean μᵢ")
-	h2 = heatmap(sd; color = :viridis,
-		clims = (0.95 * minimum(sd_true), 1.02 * maximum(sd_true)),
-		yflip = true, aspect_ratio = :equal, axis = false, ticks = false,
-		title = "belief std √(1/Pᵢ)")
-	plot(h1, h2; layout = (1, 2), size = (760, 360),
-		plot_title = "round k = $(round_k)")
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000027
-md"""
-| after k = $(round_k) rounds | value |
-|:--|--:|
-| relative residual ‖Aμ − b‖/‖b‖ | $(@sprintf("%.2e", grid_bp.res[round_k])) |
-| max error in the means | $(@sprintf("%.2e", maximum(abs.(grid_bp.mus[round_k] .- x_grid)))) |
-| mean belief std (BP) | $(@sprintf("%.4f", sum(grid_bp.sds[round_k]) / length(x_grid))) |
-| mean marginal std (exact) | $(@sprintf("%.4f", sum(sqrt.(var_grid)) / length(x_grid))) |
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000028
-md"""
-!!! tip "What to look for"
-	At ``k=1`` every node reports ``b_i/A_{ii}`` — its own equation, nothing else — and a uniformly small standard deviation: maximal over-confidence. As rounds pass, the mean fills in from the sources outward, and the standard-deviation map inflates from the boundary inward, because nodes near the boundary genuinely *are* better determined (Dirichlet conditions pin them) while interior nodes must wait to learn how loosely they are held. Both fields stop changing once the information has travelled a correlation length.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000029
-md"""
-!!! warning "Do not over-read this"
-	It is tempting — and this notebook's first draft did exactly that — to call the round-``k`` belief an *error bar on the computation*. It is not. It is the exact posterior of a **different problem**: the truncated ``k``-hop computation tree. Nothing in it estimates the distance between ``\mu^{(k)}`` and the answer ``A^{-1}b``.
-
-	The reason is visible in the update rule itself. The precision recursion ``P_{ij} = -A_{ij}^2 / P_{i\setminus j}`` **contains no ``b``**: the precisions form a closed system driven by the matrix alone. Change the right-hand side and every variance in this notebook is unchanged to the last bit, while the errors are completely different. So the belief cannot be tracking the error, and the two converge on schedules that have nothing to do with each other.
-
-	That gap — an anytime *belief* that is not an anytime *error estimate* — is, to us, the most interesting open problem in this whole construction, and §5 comes back to it.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000030
-md"""
-## 4.6 Loops: exact means, over-confident variances
-
-On a graph with cycles the same information arrives at a node by several routes and gets double-counted. The remarkable fact (Weiss & Freeman 2001) is that this does **not** spoil the means: *if* GaBP converges, the marginal means are the exact solution ``A^{-1}b``, cycles or no cycles. The variances are another matter — the computation tree that BP effectively solves keeps re-entering the same loop, and the walk-sum analysis of Malioutov, Johnson & Willsky (2006) shows BP counts only the self-return walks that revisit the root once. On an attractive model, where all those walks contribute with the same sign, the missing terms are positive, so BP **under-estimates** the variance: the solver is over-confident.
-
-That is the honest state of the art, and it is exactly the kind of statement the probabilistic-numerics community is equipped to improve on.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000031
-let
-	lo = min(minimum(grid_bp.var), minimum(var_grid))
-	hi = max(maximum(grid_bp.var), maximum(var_grid))
-	plt = plot([lo, hi], [lo, hi]; color = PAL.black, lw = 1.5, ls = :dash,
-		label = "exact", legend = :topleft, size = (560, 420),
-		xlabel = "(A⁻¹)ᵢᵢ  (exact)", ylabel = "1/Pᵢ  (belief propagation)",
-		title = "Converged GaBP variances vs the true diagonal of A⁻¹")
-	scatter!(plt, var_grid, grid_bp.var; color = PAL.blue, ms = 3.5, msw = 0.5,
-		msc = PAL.white, alpha = 0.6, label = "one node")
-	plt
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000032
-md"""
-| converged GaBP on the 24×24 lattice | |
-|:--|--:|
-| max error in the **means** | $(@sprintf("%.2e", maximum(abs.(grid_bp.mu .- x_grid)))) |
-| ratio BP variance / true variance | $(@sprintf("%.3f", minimum(grid_bp.var ./ var_grid))) – $(@sprintf("%.3f", maximum(grid_bp.var ./ var_grid))) |
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000033
-md"""
-## 4.7 The punchline: Jacobi is GaBP with the uncertainty deleted
-
-Take the algorithm above and make two changes:
-
-1. clamp every precision message to zero, ``P_{ij} := 0``;
-2. stop excluding the reverse message — let node ``i`` use what ``j`` told it when replying to ``j``.
-
-What remains is ``\mu_i = A_{ii}^{-1}\bigl(b_i - \sum_{k \neq i} A_{ki}\mu_k\bigr)``: **the Jacobi iteration** (Shental et al., Prop. 16). The classical stationary solver is the message-passing solver with the second moment thrown away and the cycle-avoidance thrown away.
-
-This is the clearest statement of the tutorial's thesis. The classical method is not an alternative to the probabilistic one; it is the probabilistic one, marginalised down to a point estimate. Everything GaBP does beyond Jacobi — carrying precisions, excluding the reverse message — is *bookkeeping about information*, and it is what buys both the uncertainty estimate and the faster convergence.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000034
-begin
-	K_jac = 40
-	clamped = gabp(A_grid, b_grid; iters = K_jac, jacobi = true, tol = 0.0, record = true)
-	jac_iterates = stationary(A_grid, b_grid, K_jac + 1; kind = :jacobi)
-	# x⁰ = 0, so Jacobi's iterate k+2 is round k of the clamped message passing
-	jac_gap = maximum(maximum(abs.(clamped.mus[k] .- jac_iterates[k + 2])) for k in 1:K_jac)
-	full_bp = gabp(A_grid, b_grid; iters = K_jac, tol = 0.0)
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000035
-md"""
-| | |
-|:--|--:|
-| max difference over $(K_jac) rounds between "GaBP with ``P_{ij} := 0``" and Jacobi | **$(@sprintf("%.2e", jac_gap))** |
-| relative residual after $(K_jac) rounds — Jacobi | $(@sprintf("%.2e", norm(A_grid * jac_iterates[K_jac + 1] - b_grid) / norm(b_grid))) |
-| relative residual after $(K_jac) rounds — full GaBP | $(@sprintf("%.2e", full_bp.res[end])) |
-
-Identical to machine precision — and the two residuals show what the discarded second moment was worth.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000036
-md"""
-## 4.8 Scheduling: nobody has to wait
-
-Message passing does not prescribe *when* nodes speak. Two standard choices:
-
-* **flooding (parallel)** — every node sends every round, using the previous round's messages. Synchronous, like Jacobi.
-* **serial (asynchronous)** — sweep the nodes and use each message the moment it exists. Like Gauss–Seidel, and typically about twice as fast.
-
-Neither needs an inner product, a norm, or any other quantity that couples all ``n`` unknowns. Convergence is not destroyed by nodes running at different speeds, by stale messages, or by a node dropping out for a while — which is what makes the scheme viable on an unreliable, heterogeneous, or genuinely geographically distributed machine. Compare against the classical methods, remembering that each CG iteration hides two global barriers.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000037
-begin
-	K_cmp = 120
-	residual_curve(A, b, xs) = [norm(A * x - b) / norm(b) for x in xs]
-
-	curves_grid = [
-		"Jacobi"              => residual_curve(A_grid, b_grid, stationary(A_grid, b_grid, K_cmp; kind = :jacobi)),
-		"Gauss–Seidel"        => residual_curve(A_grid, b_grid, stationary(A_grid, b_grid, K_cmp; kind = :gs)),
-		"conjugate gradients" => residual_curve(A_grid, b_grid, conjugate_gradients(A_grid, b_grid, K_cmp)),
-		"GaBP (flooding)"     => [1.0; gabp(A_grid, b_grid; iters = K_cmp, tol = 1e-14).res],
-		"GaBP (serial)"       => [1.0; gabp(A_grid, b_grid; iters = K_cmp, tol = 1e-14, schedule = :serial).res],
-	]
-	curves_chain = [
-		"Jacobi"              => residual_curve(A_chain, b_chain, stationary(A_chain, b_chain, K_cmp; kind = :jacobi)),
-		"conjugate gradients" => residual_curve(A_chain, b_chain, conjugate_gradients(A_chain, b_chain, K_cmp)),
-		"GaBP (flooding)"     => [1.0; gabp(A_chain, b_chain; iters = K_cmp, tol = 1e-14).res],
-	]
-	curve_style = Dict(
-		"Jacobi"              => (PAL.gray,   :dot),
-		"Gauss–Seidel"        => (PAL.pink,   :dot),
-		"conjugate gradients" => (PAL.orange, :dashdot),
-		"GaBP (flooding)"     => (PAL.blue,   :solid),
-		"GaBP (serial)"       => (PAL.green,  :solid),
-	)
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000038
-md"""
-problem: $(@bind problem_pick Select(["lattice" => "24×24 lattice (loopy)", "chain" => "chain of 80 (tree)"]))
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000039
-let
-	curves = problem_pick == "lattice" ? curves_grid : curves_chain
-	plt = plot(; yscale = :log10, ylims = (1e-15, 3.0), size = (700, 430),
-		xlabel = "iteration", ylabel = "relative residual", legend = :topright,
-		title = "Relative residual ‖Ax − b‖ / ‖b‖ per iteration")
-	for (name, c) in curves
-		color, ls = curve_style[name]
-		plot!(plt, 0:length(c)-1, max.(c, 1e-16); color, ls, lw = 2, label = name)
-	end
-	plt
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000040
-md"""
-!!! info "Reading the plot"
-	GaBP sits between the stationary methods and CG in iteration count — clearly better than Jacobi, comparable to or better than Gauss–Seidel — while being *strictly more local than either*: no global norm is ever formed, and the serial variant tolerates arbitrary update order. CG wins on iterations; whether it wins on wall-clock depends entirely on what a global reduction costs you. And on the tree, GaBP terminates *exactly* — in a bounded number of rounds, set by how far information must travel — which no stationary method does.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000041
-md"""
-## 4.9 Does it scale?
-
-Per round, each node sends one two-scalar message per incident edge: the cost is ``O(\mathrm{nnz})`` arithmetic and ``O(\mathrm{nnz})`` communication, all of it nearest-neighbour, all of it parallel. So the only question that matters is **how the round count grows with ``n``** — and that is where the probabilistic reading pays off in intuition.
-
-The screening parameter ``c`` in ``(c - \Delta)u = f`` sets the correlation length ``\ell \sim 1/\sqrt{c}`` of the Gaussian field ``\mathcal{N}(A^{-1}b, A^{-1})``. A node's marginal is determined by the nodes within a few ``\ell`` of it; everything beyond is screened off. Information therefore has to travel a *fixed physical distance*, not across the whole domain — so the round count **saturates**: it stops growing with ``n``, and the total work is ``O(n)`` with perfect parallelism.
-
-At ``c = 0`` the correlation length is the domain size, every node needs to hear from every other, and the round count grows like the diameter. This is not a defect of message passing; it is the same long-range coupling that makes unpreconditioned Jacobi and CG slow, showing up in probabilistic clothing — and it says precisely what a preconditioner has to do: *shorten the correlation length*.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000042
-begin
-	scale_sizes = [8, 12, 16, 24, 32, 48, 64]
-	scale_screens = [0.0, 0.4, 2.0]
-	scale_rounds = Dict(c => [gabp(grid_matrix(m; screening = c), bump_forcing(m);
-	                              iters = 40_000, tol = 1e-8).iters
-	                          for m in scale_sizes]
-	                    for c in scale_screens)
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000043
-let
-	plt = plot(; xscale = :log10, yscale = :log10, size = (700, 430), legend = :topleft,
-		xlabel = "number of unknowns n", ylabel = "message-passing rounds",
-		title = "Rounds to ‖Aμ − b‖/‖b‖ < 10⁻⁸, five-point stencil (c − Δ)")
-	for (c, color) in zip(scale_screens, (PAL.orange, PAL.blue, PAL.green))
-		ell = c == 0 ? "∞" : string(round(1 / sqrt(c); digits = 1))
-		plot!(plt, scale_sizes .^ 2, scale_rounds[c]; color, lw = 2, marker = :circle,
-			ms = 5, msc = PAL.white, label = "c = $(c)   (ℓ ≈ $(ell))")
-	end
-	plt
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000044
-let
-	hdr  = "| n | " * join(["rounds (c = $(c))" for c in scale_screens], " | ") * " |"
-	sep  = "|---|" * repeat("---|", length(scale_screens))
-	rows = ["| $(m^2) | " * join([string(scale_rounds[c][k]) for c in scale_screens], " | ") * " |"
-	        for (k, m) in enumerate(scale_sizes)]
-	note = "\nAcross a 64-fold increase in ``n``, the screened columns grow by a factor of two " *
-	       "or less while the unscreened one grows with the diameter of the domain. " *
-	       "A column that flattens is an ``O(n)`` solver with no global communication."
-	Markdown.parse(join([hdr, sep, rows..., note], "\n"))
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000045
-md"""
-## 4.10 When it fails
-
-GaBP is not unconditionally convergent, and the sufficient conditions are the familiar ones:
-
-* ``A`` strictly **diagonally dominant** ``\Rightarrow`` convergence to the exact means (Weiss & Freeman 2001);
-* **walk-summability**, ``\rho\bigl(|I - D^{-1}A|\bigr) < 1`` with ``D = \operatorname{diag}(A)``, a strictly weaker condition (Malioutov et al. 2006);
-* a **tree**, in which case it converges exactly regardless of the spectral radius.
-
-In practice the basin is considerably larger than those conditions — but it does have an edge. Below, a lattice with random ``\pm w`` couplings (a "frustrated" model, the sort where loops carry conflicting information) sweeps from harmless to divergent. Watch the diagnostics: both sufficient conditions are crossed long before anything goes wrong, and then convergence fails somewhere near the point where the Gaussian stops being a valid distribution at all.
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000046
-"Lattice with random ±w couplings and unit diagonal — loops with conflicting information."
-function frustrated_matrix(m, w; seed = 3)
-	rng = Xoshiro(seed)
-	G = grid_matrix(m) - spdiagm(0 => diag(grid_matrix(m)))
-	rows, cols, _ = findnz(G)
-	signs = Dict{Tuple{Int,Int},Float64}()
-	vals = similar(rows, Float64)
-	for e in eachindex(rows)
-		key = minmax(rows[e], cols[e])
-		vals[e] = w * get!(() -> rand(rng, (-1.0, 1.0)), signs, key)
-	end
-	sparse(rows, cols, vals, m^2, m^2) + sparse(I, m^2, m^2)
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000047
-md"""
-coupling strength ``w``: $(@bind coupling Slider(0.05:0.01:0.35, default = 0.20, show_value = true))
-
-damping ``\alpha``: $(@bind damping_ui Slider(0.0:0.1:0.9, default = 0.0, show_value = true))
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000048
-begin
-	m_fr = 12
-	A_fr = frustrated_matrix(m_fr, coupling)
-	b_fr = randn(Xoshiro(7), m_fr^2)
-	fr_run = gabp(A_fr, b_fr; iters = 600, tol = 1e-10, damping = damping_ui)
-
-	fr_diag = let Ad = Matrix(A_fr), D = Diagonal(1 ./ diag(Matrix(A_fr)))
-		(rho = maximum(abs.(eigvals(abs.(Matrix(1.0I, m_fr^2, m_fr^2) - D * Ad)))),
-		 lam = minimum(eigvals(Symmetric(Ad))),
-		 dd  = minimum(abs.(diag(Ad)) .- (vec(sum(abs.(Ad); dims = 2)) .- abs.(diag(Ad)))))
-	end
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000049
-let
-	res = clamp.(replace(fr_run.res, NaN => 1e10), 1e-16, 1e10)
-	plot(1:length(res), res; yscale = :log10, lw = 2, legend = false, size = (700, 340),
-		color = fr_run.converged ? PAL.blue : PAL.orange,
-		xlabel = "round", ylabel = "‖Aμ − b‖ / ‖b‖",
-		title = "relative residual" * (fr_run.converged ? "" : "  —  DIVERGED"))
-end
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000050
-md"""
-| diagnostic | value | verdict |
-|:--|--:|:--|
-| diagonal dominance margin ``\min_i (\lvert A_{ii}\rvert - \sum_{j\neq i}\lvert A_{ij}\rvert)`` | $(@sprintf("%+.3f", fr_diag.dd)) | $(fr_diag.dd > 0 ? "dominant" : "not dominant") |
-| walk-summability ``\rho(\lvert I - D^{-1}A\rvert)`` | $(@sprintf("%.3f", fr_diag.rho)) | $(fr_diag.rho < 1 ? "walk-summable" : "not walk-summable") |
-| smallest eigenvalue ``\lambda_{\min}(A)`` | $(@sprintf("%+.3f", fr_diag.lam)) | $(fr_diag.lam > 0 ? "valid Gaussian" : "not a distribution") |
-| GaBP | $(fr_run.iters) rounds | $(fr_run.converged ? "converged" : "diverged") |
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000051
-md"""
-!!! warning "Try it"
-	Push ``w`` up from 0.05. The unit diagonal is beaten by the four couplings at ``w = 0.25`` and walk-summability goes one step later at ``w \approx 0.26`` — the two sufficient conditions fail together, and neither failure costs anything: the solver keeps converging, taking 45 rounds at ``w = 0.26`` and 353 at ``w = 0.29``. It breaks between ``w = 0.29`` and ``w = 0.30``, which is essentially where ``A`` stops being positive definite (``\lambda_{\min} = +0.010`` at ``w = 0.30``).
-
-	Then turn on damping, ``P \leftarrow (1-\alpha)P_{\text{new}} + \alpha P_{\text{old}}``: it buys smoothness in the borderline regime but does **not** rescue the indefinite case — and it should not, because there is no valid Gaussian left to infer. Sharp characterisations of the convergence basin, and principled fixes outside it, remain open (see Johnson et al. 2009, Ruozzi & Tatikonda 2013).
-"""
-
-# ╔═╡ aabbccdd-0000-4000-8000-000000000052
-md"""
-# 5. Where this goes
-
-We arrived at a linear solver that is local, asynchronous, communication-light, and reports a per-node uncertainty as a by-product — and whose classical counterpart (Jacobi) is literally itself with the second moment deleted. That combination is the argument of this tutorial: **probabilistic numerics at scale wants message passing, because message passing is what turns a global belief into a distributed one.**
-
-Possible research directions:
-
-* **Beyond symmetry.** GaBP as derived needs ``A = A^\top``. Shental et al. (§VII) embed a rectangular ``S`` into a symmetric system whose solution is the ridge/pseudo-inverse estimate ``(S^\top S + \Psi)^{-1}S^\top y`` — with ``2nk`` messages rather than ``n^2``. Fanaskov (2022) instead modifies the messages themselves for non-symmetric ``A``, relates the result to LU and block-LU factorisation, and uses GaBP as a **multigrid smoother**, where it is markedly more robust than incomplete-LU or Gauss–Seidel smoothing.
-* **Beyond linear systems.** Because an interior-point method is a sequence of linear systems (Newton steps on the Hessian), swapping each solve for GaBP gives a **distributed linear-programming solver** (Bickson et al. 2008). The same substitution works anywhere a Newton step is the inner loop.
-* **Better uncertainty.** Two distinct problems, and this tutorial solves neither. *First*, the means are exact on convergence but the variances are not: generalised BP / the cluster-variation method (the second algorithm in Fanaskov 2022), or the walk-sum corrections of Johnson et al., buy calibration by giving up locality. **What is the cheapest message-passing scheme with honest variances?** *Second*, and more fundamental (§4.5): the belief is a statement about the ``k``-hop sub-problem, not about the error, because the precision recursion never sees ``b``. An anytime *belief* is not an anytime *error estimate*, and nothing in the classical GaBP literature is trying to make it one. **What would a message that carried error information — rather than only information about ``A`` — even look like?** Both are probabilistic-numerics questions, not linear-algebra ones; the second is the one we would most like an answer to.
-* **Applications where the graph is real.** Power-grid state estimation, sensor-network localisation, SLAM and bundle adjustment (Gaussian BP is the engine of several modern SLAM back-ends), CDMA multiuser detection — in each case the factor graph is not a metaphor for the sparsity pattern; it is the physical layout of the machine. The die of §1 is the limiting case, where the graph is *literally* the silicon; and that this is a good bargain in wall-clock, not just in rhetoric, has been measured. Ortiz et al. (2020) solved a real bundle-adjustment problem by GaBP on the 1216 cores of a single graph processor in under 40 ms, against 1450 ms for a sparse-Cholesky CPU library — the whole margin coming from an algorithm that never needs anything but nearest-neighbour exchange.
-
-### References
-
-* Shental, O., Bickson, D., Siegel, P. H., Wolf, J. K., & Dolev, D. (2008). *Gaussian belief propagation solver for systems of linear equations*. IEEE ISIT, 1863–1867. Extended: [arXiv:0810.1119](https://arxiv.org/abs/0810.1119).
-* Bickson, D., Tock, Y., Shental, O., & Dolev, D. (2008). *Polynomial linear programming with Gaussian belief propagation*. Allerton, 895–901.
-* Fanaskov, V. (2022). *Gaussian belief propagation solvers for nonsymmetric systems of linear equations*. SIAM J. Sci. Comput., 44(2), A77–A102.
-* Weiss, Y., & Freeman, W. T. (2001). *Correctness of belief propagation in Gaussian graphical models of arbitrary topology*. Neural Computation, 13(10), 2173–2200.
-* Malioutov, D. M., Johnson, J. K., & Willsky, A. S. (2006). *Walk-sums and belief propagation in Gaussian graphical models*. JMLR, 7, 2031–2064.
-* Hennig, P., Osborne, M. A., & Kersting, H. P. (2022). *Probabilistic Numerics: Computation as Machine Learning*. Cambridge University Press.
-* Cockayne, J., Oates, C. J., Ipsen, I. C. F., & Girolami, M. (2019). *A Bayesian conjugate gradient method*. Bayesian Analysis, 14(3), 937–1012.
-* Ortiz, J., Pupilli, M., Leutenegger, S., & Davison, A. J. (2020). *Bundle adjustment on a graph processor*. CVPR, 2413–2422. [arXiv:2003.03134](https://arxiv.org/abs/2003.03134).
-"""
+Averaging again over one period gives ``\langle\overline{x}\rangle=25-\sum_k a_k/320``. Staying at or below 20°C at every time requires ``\sum_k a_k\ge1600``. Balanced phases attain that bound by cancelling the oscillation in the spatial average. Other phase/amplitude combinations can attain it too.
+
+**Extension:** inspect the map at several phases. Can schedules with the same optimal average and effort produce different hotspots? What changes if the constraint applies to the hottest tile instead?
+""")
+</details>
+""")
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
 [deps]
+HypertextLiteral = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
-Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+ReactiveMP = "a194aa59-28ba-4574-a09c-4a745416d6e3"
+RxInfer = "86711068-29c9-4ff7-b620-ae75d7495b3d"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [compat]
-Plots = "~1.41.6"
+HypertextLiteral = "~1.0.0"
+Plots = "~1.41.7"
 PlutoUI = "~0.7.83"
+ReactiveMP = "~6.5.0"
+RxInfer = "~5.5.2"
+"""
+
+# ╔═╡ 00000000-0000-0000-0000-000000000002
+PLUTO_MANIFEST_TOML_CONTENTS = """
+# This file is machine-generated - editing it directly is not advised
+
+julia_version = "1.11.9"
+manifest_format = "2.0"
+project_hash = "ed893201ee5c8f642437d74f022ef75dc12c8da0"
+
+[[deps.ADTypes]]
+deps = ["PrecompileTools"]
+git-tree-sha1 = "629de23e1c16911b439dabd2303c08af9575b226"
+uuid = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
+version = "1.24.0"
+
+    [deps.ADTypes.extensions]
+    ADTypesChainRulesCoreExt = "ChainRulesCore"
+    ADTypesConstructionBaseExt = "ConstructionBase"
+    ADTypesEnzymeCoreExt = "EnzymeCore"
+
+    [deps.ADTypes.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    ConstructionBase = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
+    EnzymeCore = "f151be2c-9106-41f4-ab19-57ee4f262869"
+
+[[deps.AbstractPlutoDingetjes]]
+git-tree-sha1 = "6c3913f4e9bdf6ba3c08041a446fb1332716cbc2"
+uuid = "6e696c72-6542-2067-7265-42206c756150"
+version = "1.4.0"
+
+[[deps.Accessors]]
+deps = ["CompositionsBase", "ConstructionBase", "Dates", "InverseFunctions", "MacroTools"]
+git-tree-sha1 = "7063ad1083578215c7c4bf410368150abe8d5524"
+uuid = "7d9f7c33-5ae7-4f3b-8dc6-eff91059b697"
+version = "0.1.45"
+
+    [deps.Accessors.extensions]
+    AxisKeysExt = "AxisKeys"
+    IntervalSetsExt = "IntervalSets"
+    LinearAlgebraExt = "LinearAlgebra"
+    StaticArraysExt = "StaticArrays"
+    StructArraysExt = "StructArrays"
+    TestExt = "Test"
+    UnitfulExt = "Unitful"
+
+    [deps.Accessors.weakdeps]
+    AxisKeys = "94b1ba4f-4ee9-5380-92f1-94cde586c3c5"
+    IntervalSets = "8197267c-284f-5f27-9208-e0e47529a953"
+    LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+    StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+    StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
+    Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+    Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+
+[[deps.Adapt]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "daa72978cd7a624246e894a4f4f067706d4e17e2"
+uuid = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+version = "4.7.0"
+weakdeps = ["SparseArrays", "StaticArrays"]
+
+    [deps.Adapt.extensions]
+    AdaptSparseArraysExt = "SparseArrays"
+    AdaptStaticArraysExt = "StaticArrays"
+
+[[deps.AliasTables]]
+deps = ["PtrArrays", "Random"]
+git-tree-sha1 = "9876e1e164b144ca45e9e3198d0b689cadfed9ff"
+uuid = "66dad0bd-aa9a-41b7-9441-69ab47430ed8"
+version = "1.1.3"
+
+[[deps.ArgTools]]
+uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
+version = "1.1.2"
+
+[[deps.ArnoldiMethod]]
+deps = ["LinearAlgebra", "Random", "StaticArrays"]
+git-tree-sha1 = "d57bd3762d308bded22c3b82d033bff85f6195c6"
+uuid = "ec485272-7323-5ecc-a04f-4719b315124d"
+version = "0.4.0"
+
+[[deps.ArrayInterface]]
+deps = ["Adapt", "LinearAlgebra"]
+git-tree-sha1 = "daf5b2aab5b1c1fdcb65b05883cdb4b18abac1b9"
+uuid = "4fba245c-0d91-5ea0-9b3e-6abc04ee57a9"
+version = "7.30.1"
+
+    [deps.ArrayInterface.extensions]
+    ArrayInterfaceAMDGPUExt = "AMDGPU"
+    ArrayInterfaceBandedMatricesExt = "BandedMatrices"
+    ArrayInterfaceBlockBandedMatricesExt = "BlockBandedMatrices"
+    ArrayInterfaceCUDAExt = "CUDA"
+    ArrayInterfaceCUDSSExt = ["CUDSS", "CUDA"]
+    ArrayInterfaceChainRulesCoreExt = "ChainRulesCore"
+    ArrayInterfaceChainRulesExt = "ChainRules"
+    ArrayInterfaceFillArraysExt = "FillArrays"
+    ArrayInterfaceGPUArraysCoreExt = "GPUArraysCore"
+    ArrayInterfaceGPUArraysCoreTrackerExt = ["GPUArraysCore", "Tracker"]
+    ArrayInterfaceMetalExt = "Metal"
+    ArrayInterfaceReverseDiffExt = "ReverseDiff"
+    ArrayInterfaceSparseArraysExt = "SparseArrays"
+    ArrayInterfaceStaticArraysCoreExt = "StaticArraysCore"
+    ArrayInterfaceTrackerExt = "Tracker"
+
+    [deps.ArrayInterface.weakdeps]
+    AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+    BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
+    BlockBandedMatrices = "ffab5731-97b5-5995-9138-79e8c1846df0"
+    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+    CUDSS = "45b445bb-4962-46a0-9369-b4df9d0f772e"
+    ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    FillArrays = "1a297f60-69ca-5386-bcde-b61e274b549b"
+    GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
+    Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+    ReverseDiff = "37e2e3b7-166d-5795-8a7a-e32c996b4267"
+    SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+    StaticArraysCore = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
+    Tracker = "9f7883ad-71c0-57eb-9f7f-b5c9e6d3789c"
+
+[[deps.ArrayLayouts]]
+deps = ["FillArrays", "LinearAlgebra", "StaticArrays"]
+git-tree-sha1 = "e0b47732a192dd59b9d079a06d04235e2f833963"
+uuid = "4c555306-a7a7-4459-81d9-ec55ddd5c99a"
+version = "1.12.2"
+weakdeps = ["SparseArrays"]
+
+    [deps.ArrayLayouts.extensions]
+    ArrayLayoutsSparseArraysExt = "SparseArrays"
+
+[[deps.Artifacts]]
+uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
+version = "1.11.0"
+
+[[deps.Base64]]
+uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+version = "1.11.0"
+
+[[deps.BayesBase]]
+deps = ["Distributions", "DomainSets", "LinearAlgebra", "Random", "SpecialFunctions", "StaticArrays", "Statistics", "StatsAPI", "StatsBase", "StatsFuns", "TinyHugeNumbers"]
+git-tree-sha1 = "e644fb61dcc7b0df1be931230d2b9bc3a96d912f"
+uuid = "b4ee3484-f114-42fe-b91c-797d54a0c67e"
+version = "1.5.9"
+weakdeps = ["FastCholesky"]
+
+    [deps.BayesBase.extensions]
+    FastCholeskyExt = "FastCholesky"
+
+[[deps.BitFlags]]
+git-tree-sha1 = "bbe1079eecf9c9fbb52765193ad2bae27ae09bc8"
+uuid = "d1d4a3ce-64b1-5f1a-9ba4-7e7e69966f35"
+version = "0.1.10"
+
+[[deps.BitSetTuples]]
+deps = ["TupleTools"]
+git-tree-sha1 = "aa19428fb6ad21db22f8568f068de4f443d3bacc"
+uuid = "0f2f92aa-23a3-4d05-b791-88071d064721"
+version = "1.1.5"
+
+[[deps.BlockArrays]]
+deps = ["ArrayLayouts", "FillArrays", "LinearAlgebra"]
+git-tree-sha1 = "75c9c4d41f387b58ac7ecac17a02062f4cf8e92a"
+uuid = "8e7c35d0-a365-5155-bbbb-fb81a777f24e"
+version = "1.10.0"
+
+    [deps.BlockArrays.extensions]
+    BlockArraysAdaptExt = "Adapt"
+    BlockArraysBandedMatricesExt = "BandedMatrices"
+
+    [deps.BlockArrays.weakdeps]
+    Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+    BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
+
+[[deps.Bzip2_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "1b96ea4a01afe0ea4090c5c8039690672dd13f2e"
+uuid = "6e34b625-4abd-537c-b88f-471c36dfa7a0"
+version = "1.0.9+0"
+
+[[deps.Cairo_jll]]
+deps = ["Artifacts", "Bzip2_jll", "CompilerSupportLibraries_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll", "JLLWrappers", "Libdl", "Pixman_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Zlib_jll", "libpng_jll"]
+git-tree-sha1 = "1fa950ebc3e37eccd51c6a8fe1f92f7d86263522"
+uuid = "83423d85-b0ee-5818-9007-b63ccbeb887a"
+version = "1.18.7+0"
+
+[[deps.ChunkCodecCore]]
+git-tree-sha1 = "3496e2b359c27793d12bec54ec94be7983a6ceb2"
+uuid = "0b6fb165-00bc-4d37-ab8b-79f91016dbe1"
+version = "1.0.2"
+
+[[deps.ChunkCodecLibZlib]]
+deps = ["ChunkCodecCore", "Zlib_jll"]
+git-tree-sha1 = "d4101e848e8d3f585d61d244c2fe0c80a70e6b3b"
+uuid = "4c0bbee4-addc-4d73-81a0-b6caacae83c8"
+version = "1.1.0"
+
+[[deps.ChunkCodecLibZstd]]
+deps = ["ChunkCodecCore", "Zstd_jll"]
+git-tree-sha1 = "34d9873079e4cb3d0c62926a225136824677073f"
+uuid = "55437552-ac27-4d47-9aa3-63184e8fd398"
+version = "1.0.0"
+
+[[deps.CodecZlib]]
+deps = ["TranscodingStreams", "Zlib_jll"]
+git-tree-sha1 = "970758a3d591a2a5c2a907c53f2e2f8c1b1d3537"
+uuid = "944b1d66-785c-5afd-91f1-9de20f533193"
+version = "0.7.9"
+
+[[deps.ColorSchemes]]
+deps = ["ColorTypes", "ColorVectorSpace", "Colors", "FixedPointNumbers", "PrecompileTools", "Random"]
+git-tree-sha1 = "b0fd3f56fa442f81e0a47815c92245acfaaa4e34"
+uuid = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
+version = "3.31.0"
+
+[[deps.ColorTypes]]
+deps = ["FixedPointNumbers", "Random"]
+git-tree-sha1 = "67e11ee83a43eb71ddc950302c53bf33f0690dfe"
+uuid = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
+version = "0.12.1"
+weakdeps = ["StyledStrings"]
+
+    [deps.ColorTypes.extensions]
+    StyledStringsExt = "StyledStrings"
+
+[[deps.ColorVectorSpace]]
+deps = ["ColorTypes", "FixedPointNumbers", "LinearAlgebra", "Requires", "Statistics", "TensorCore"]
+git-tree-sha1 = "8b3b6f87ce8f65a2b4f857528fd8d70086cd72b1"
+uuid = "c3611d14-8923-5661-9e6a-0046d554d3a4"
+version = "0.11.0"
+weakdeps = ["SpecialFunctions"]
+
+    [deps.ColorVectorSpace.extensions]
+    SpecialFunctionsExt = "SpecialFunctions"
+
+[[deps.Colors]]
+deps = ["ColorTypes", "FixedPointNumbers", "Reexport"]
+git-tree-sha1 = "37ea44092930b1811e666c3bc38065d7d87fcc74"
+uuid = "5ae59095-9a9b-59fe-a467-6f913c188581"
+version = "0.13.1"
+
+[[deps.Combinatorics]]
+git-tree-sha1 = "c761b00e7755700f9cdf5b02039939d1359330e1"
+uuid = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
+version = "1.1.0"
+
+[[deps.CommonSolve]]
+deps = ["PrecompileTools"]
+git-tree-sha1 = "6c389fa857f6ca5a95474b52a52023fd77f24cb7"
+uuid = "38540f10-b2f7-11e9-35d8-d573e4eb0ff2"
+version = "0.2.14"
+
+[[deps.CommonSubexpressions]]
+deps = ["MacroTools"]
+git-tree-sha1 = "cda2cfaebb4be89c9084adaca7dd7333369715c5"
+uuid = "bbf7d656-a473-5ed7-a52c-81e309532950"
+version = "0.3.1"
+
+[[deps.CommonWorldInvalidations]]
+deps = ["PrecompileTools"]
+git-tree-sha1 = "6600cd2b039cd07dd8043fd05b0ff2899d9da73b"
+uuid = "f70d9fcc-98c5-4d4a-abd7-e4cdeebd8ca8"
+version = "1.2.1"
+
+[[deps.CompilerSupportLibraries_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "e66e0078-7015-5450-92f7-15fbd957f2ae"
+version = "1.1.1+0"
+
+[[deps.CompositeTypes]]
+git-tree-sha1 = "bce26c3dab336582805503bed209faab1c279768"
+uuid = "b152e2b5-7a66-4b01-a709-34e65c35f657"
+version = "0.1.4"
+
+[[deps.CompositionsBase]]
+git-tree-sha1 = "802bb88cd69dfd1509f6670416bd4434015693ad"
+uuid = "a33af91c-f02d-484b-be07-31d278c5ca2b"
+version = "0.1.2"
+weakdeps = ["InverseFunctions"]
+
+    [deps.CompositionsBase.extensions]
+    CompositionsBaseInverseFunctionsExt = "InverseFunctions"
+
+[[deps.ConcurrentUtilities]]
+deps = ["Serialization", "Sockets"]
+git-tree-sha1 = "3c9be947934c38475bafe822c6d61aaed17f0738"
+uuid = "f0e56b4a-5159-44fe-b623-3e5288b988bb"
+version = "2.6.0"
+
+[[deps.ConstructionBase]]
+git-tree-sha1 = "b4b092499347b18a015186eae3042f72267106cb"
+uuid = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
+version = "1.6.0"
+weakdeps = ["IntervalSets", "LinearAlgebra", "StaticArrays"]
+
+    [deps.ConstructionBase.extensions]
+    ConstructionBaseIntervalSetsExt = "IntervalSets"
+    ConstructionBaseLinearAlgebraExt = "LinearAlgebra"
+    ConstructionBaseStaticArraysExt = "StaticArrays"
+
+[[deps.Contour]]
+git-tree-sha1 = "439e35b0b36e2e5881738abc8857bd92ad6ff9a8"
+uuid = "d38c429a-6771-53c6-b99e-75d170b6e991"
+version = "0.6.3"
+
+[[deps.DataAPI]]
+git-tree-sha1 = "abe83f3a2f1b857aac70ef8b269080af17764bbe"
+uuid = "9a962f9c-6df0-11e9-0e5d-c546b8b5ee8a"
+version = "1.16.0"
+
+[[deps.DataStructures]]
+deps = ["OrderedCollections"]
+git-tree-sha1 = "b0bc6d2cad1fed8b7fd59a1551a991cb3d2809e6"
+uuid = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
+version = "0.19.6"
+
+[[deps.Dates]]
+deps = ["Printf"]
+uuid = "ade2ca70-3891-5945-98fb-dc099432e06a"
+version = "1.11.0"
+
+[[deps.Dbus_jll]]
+deps = ["Artifacts", "Expat_jll", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "473e9afc9cf30814eb67ffa5f2db7df82c3ad9fd"
+uuid = "ee1fde0b-3d02-5ea6-8484-8dfef6360eab"
+version = "1.16.2+0"
+
+[[deps.DelimitedFiles]]
+deps = ["Mmap"]
+git-tree-sha1 = "9e2f36d3c96a820c678f2f1f1782582fcf685bae"
+uuid = "8bb1440f-4735-579b-a4ab-409b98df4dab"
+version = "1.9.1"
+
+[[deps.Dictionaries]]
+deps = ["Indexing", "Random", "Serialization"]
+git-tree-sha1 = "a55766a9c8f66cf19ffcdbdb1444e249bb4ace33"
+uuid = "85a47980-9c8c-11e8-2b9f-f7ca1fa99fb4"
+version = "0.4.6"
+
+[[deps.DiffResults]]
+deps = ["StaticArraysCore"]
+git-tree-sha1 = "782dd5f4561f5d267313f23853baaaa4c52ea621"
+uuid = "163ba53b-c6d8-5494-b064-1a9d43ac40c5"
+version = "1.1.0"
+
+[[deps.DiffRules]]
+deps = ["IrrationalConstants", "LogExpFunctions", "NaNMath", "Random", "SpecialFunctions"]
+git-tree-sha1 = "79a2aca180a85c690c58a020d47b426954b590f8"
+uuid = "b552c78f-8df3-52c6-915a-8e097449b14b"
+version = "1.16.0"
+
+[[deps.DifferentiationInterface]]
+deps = ["ADTypes", "LinearAlgebra"]
+git-tree-sha1 = "0693d8b0a4608ff289d228ab4c598df5894845cd"
+uuid = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
+version = "0.7.21"
+
+    [deps.DifferentiationInterface.extensions]
+    DifferentiationInterfaceChainRulesCoreExt = "ChainRulesCore"
+    DifferentiationInterfaceDiffractorExt = "Diffractor"
+    DifferentiationInterfaceEnzymeExt = ["EnzymeCore", "Enzyme"]
+    DifferentiationInterfaceFastDifferentiationExt = "FastDifferentiation"
+    DifferentiationInterfaceFiniteDiffExt = "FiniteDiff"
+    DifferentiationInterfaceFiniteDifferencesExt = "FiniteDifferences"
+    DifferentiationInterfaceForwardDiffExt = ["ForwardDiff", "DiffResults"]
+    DifferentiationInterfaceGPUArraysCoreExt = ["GPUArraysCore", "Adapt"]
+    DifferentiationInterfaceGTPSAExt = "GTPSA"
+    DifferentiationInterfaceHyperHessiansExt = "HyperHessians"
+    DifferentiationInterfaceMooncakeExt = "Mooncake"
+    DifferentiationInterfacePolyesterForwardDiffExt = ["PolyesterForwardDiff", "ForwardDiff", "DiffResults"]
+    DifferentiationInterfaceReverseDiffExt = ["ReverseDiff", "DiffResults"]
+    DifferentiationInterfaceSparseArraysExt = "SparseArrays"
+    DifferentiationInterfaceSparseConnectivityTracerExt = "SparseConnectivityTracer"
+    DifferentiationInterfaceSparseMatrixColoringsExt = "SparseMatrixColorings"
+    DifferentiationInterfaceStaticArraysExt = "StaticArrays"
+    DifferentiationInterfaceSymbolicsExt = "Symbolics"
+    DifferentiationInterfaceTrackerExt = "Tracker"
+    DifferentiationInterfaceZygoteExt = ["Zygote", "ForwardDiff"]
+
+    [deps.DifferentiationInterface.weakdeps]
+    Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    DiffResults = "163ba53b-c6d8-5494-b064-1a9d43ac40c5"
+    Diffractor = "9f5e2b26-1114-432f-b630-d3fe2085c51c"
+    Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+    EnzymeCore = "f151be2c-9106-41f4-ab19-57ee4f262869"
+    FastDifferentiation = "eb9bf01b-bf85-4b60-bf87-ee5de06c00be"
+    FiniteDiff = "6a86dc24-6348-571c-b903-95158fe2bd41"
+    FiniteDifferences = "26cc04aa-876d-5657-8c51-4c34ba976000"
+    ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+    GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
+    GTPSA = "b27dd330-f138-47c5-815b-40db9dd9b6e8"
+    HyperHessians = "06b494a0-c8e0-40cc-ad32-d99506a00a6c"
+    Mooncake = "da2b9cff-9c12-43a0-ae48-6db2b0edb7d6"
+    PolyesterForwardDiff = "98d1487c-24ca-40b6-b7ab-df2af84e126b"
+    ReverseDiff = "37e2e3b7-166d-5795-8a7a-e32c996b4267"
+    SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+    SparseConnectivityTracer = "9f842d2f-2579-4b1d-911e-f412cf18a3f5"
+    SparseMatrixColorings = "0a514795-09f3-496d-8182-132a7b665d35"
+    StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+    Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
+    Tracker = "9f7883ad-71c0-57eb-9f7f-b5c9e6d3789c"
+    Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
+
+[[deps.Distributed]]
+deps = ["Random", "Serialization", "Sockets"]
+uuid = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+version = "1.11.0"
+
+[[deps.Distributions]]
+deps = ["AliasTables", "FillArrays", "LinearAlgebra", "PDMats", "Printf", "QuadGK", "Random", "Roots", "SpecialFunctions", "Statistics", "StatsAPI", "StatsBase", "StatsFuns"]
+git-tree-sha1 = "a958ab3a40c755563f5e1405c0846cb0446bf19d"
+uuid = "31c24e10-a181-5473-b8eb-7969acd0382f"
+version = "0.25.131"
+
+    [deps.Distributions.extensions]
+    DistributionsChainRulesCoreExt = "ChainRulesCore"
+    DistributionsDensityInterfaceExt = "DensityInterface"
+    DistributionsSparseConnectivityTracerExt = "SparseConnectivityTracer"
+    DistributionsTestExt = "Test"
+
+    [deps.Distributions.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    DensityInterface = "b429d917-457f-4dbc-8f4c-0cc954292b1d"
+    SparseConnectivityTracer = "9f842d2f-2579-4b1d-911e-f412cf18a3f5"
+    Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[[deps.DocStringExtensions]]
+git-tree-sha1 = "7442a5dfe1ebb773c29cc2962a8980f47221d76c"
+uuid = "ffbed154-4ef7-542d-bbb7-c09d3a79fcae"
+version = "0.9.5"
+
+[[deps.DomainIntegrals]]
+deps = ["CompositeTypes", "DomainSets", "FastGaussQuadrature", "FunctionMaps", "GaussQuadrature", "HCubature", "IntervalSets", "LinearAlgebra", "QuadGK", "SpecialFunctions", "StaticArrays"]
+git-tree-sha1 = "e90efe58cabfd58984ba5ba8edaf440251233384"
+uuid = "cc6bae93-f070-4015-88fd-838f9505a86c"
+version = "0.5.4"
+
+[[deps.DomainSets]]
+deps = ["CompositeTypes", "FunctionMaps", "IntervalSets", "LinearAlgebra", "StaticArrays"]
+git-tree-sha1 = "4599e0cd684f3ff6cbbab73c77553a3d01a8d74d"
+uuid = "5b8099bc-c8ec-5219-889f-1d9e522a28bf"
+version = "0.7.18"
+
+    [deps.DomainSets.extensions]
+    DomainSetsMakieExt = "Makie"
+    DomainSetsRandomExt = "Random"
+
+    [deps.DomainSets.weakdeps]
+    Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+    Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+
+[[deps.Downloads]]
+deps = ["ArgTools", "FileWatching", "LibCURL", "NetworkOptions"]
+uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
+version = "1.6.0"
+
+[[deps.EnumX]]
+git-tree-sha1 = "c49898e8438c828577f04b92fc9368c388ac783c"
+uuid = "4e289a0a-7415-4d19-859d-a7e5c4648b56"
+version = "1.0.7"
+
+[[deps.EpollShim_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "8a4be429317c42cfae6a7fc03c31bad1970c310d"
+uuid = "2702e6a9-849d-5ed8-8c21-79e8b8f9ee43"
+version = "0.0.20230411+1"
+
+[[deps.ExceptionUnwrapping]]
+deps = ["Test"]
+git-tree-sha1 = "d36f682e590a83d63d1c7dbd287573764682d12a"
+uuid = "460bff9d-24e4-43bc-9d9f-a8973cb893f4"
+version = "0.1.11"
+
+[[deps.Expat_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "f4d39eee89f1e58c26bf447f1d4156c0125d6838"
+uuid = "2e619515-83b5-522b-bb60-26c02a35a201"
+version = "2.8.3+0"
+
+[[deps.ExponentialFamily]]
+deps = ["BayesBase", "BlockArrays", "Distributions", "DomainSets", "FastCholesky", "FillArrays", "ForwardDiff", "HCubature", "HypergeometricFunctions", "IntervalSets", "IrrationalConstants", "LinearAlgebra", "LogExpFunctions", "PositiveFactorizations", "Random", "SparseArrays", "SpecialFunctions", "StaticArrays", "StatsBase", "StatsFuns", "TinyHugeNumbers"]
+git-tree-sha1 = "20ad837c63e1e0f42933a1f370658150b8d6ae88"
+uuid = "62312e5e-252a-4322-ace9-a5f4bf9b357b"
+version = "2.5.1"
+
+[[deps.FFMPEG]]
+deps = ["FFMPEG_jll"]
+git-tree-sha1 = "95ecf07c2eea562b5adbd0696af6db62c0f52560"
+uuid = "c87230d0-a227-11e9-1b43-d7ebe4e7570a"
+version = "0.4.5"
+
+[[deps.FFMPEG_jll]]
+deps = ["Artifacts", "Bzip2_jll", "FreeType2_jll", "FriBidi_jll", "JLLWrappers", "LAME_jll", "Libdl", "Ogg_jll", "OpenSSL_jll", "Opus_jll", "PCRE2_jll", "Zlib_jll", "libaom_jll", "libass_jll", "libfdk_aac_jll", "libva_jll", "libvorbis_jll", "x264_jll", "x265_jll"]
+git-tree-sha1 = "7a58e45171b63ed4782f2d36fdee8713a469e6e0"
+uuid = "b22a6f82-2f65-5046-a5b2-351ab43fb4e5"
+version = "8.1.2+0"
+
+[[deps.FastCholesky]]
+deps = ["LinearAlgebra", "PositiveFactorizations"]
+git-tree-sha1 = "1c0a81e006e40e9fcbd5f6f6cb42ac2700f86889"
+uuid = "2d5283b6-8564-42b6-bb00-83ed8e915756"
+version = "1.4.3"
+weakdeps = ["StaticArraysCore"]
+
+    [deps.FastCholesky.extensions]
+    StaticArraysCoreExt = "StaticArraysCore"
+
+[[deps.FastGaussQuadrature]]
+deps = ["LinearAlgebra", "SpecialFunctions", "StaticArrays"]
+git-tree-sha1 = "4916117dd032ec5959b7633aedbbac408ca5ddeb"
+uuid = "442a2c76-b920-505d-bb47-c5924d526838"
+version = "1.3.0"
+
+[[deps.FileIO]]
+deps = ["Pkg", "Requires", "UUIDs"]
+git-tree-sha1 = "6621fef488e496356c9c9625d0562c12a6070819"
+uuid = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+version = "1.20.0"
+weakdeps = ["HTTP"]
+
+    [deps.FileIO.extensions]
+    HTTPExt = "HTTP"
+
+[[deps.FileWatching]]
+uuid = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
+version = "1.11.0"
+
+[[deps.FillArrays]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "5bad39456d9f0166184fce2248783dd9862645c1"
+uuid = "1a297f60-69ca-5386-bcde-b61e274b549b"
+version = "1.17.0"
+weakdeps = ["PDMats", "SparseArrays", "StaticArrays", "Statistics"]
+
+    [deps.FillArrays.extensions]
+    FillArraysPDMatsExt = "PDMats"
+    FillArraysSparseArraysExt = "SparseArrays"
+    FillArraysStaticArraysExt = "StaticArrays"
+    FillArraysStatisticsExt = "Statistics"
+
+[[deps.FiniteDiff]]
+deps = ["ArrayInterface", "LinearAlgebra", "Setfield"]
+git-tree-sha1 = "5031f23e040bf17082e5b52422d77b5e844eefb1"
+uuid = "6a86dc24-6348-571c-b903-95158fe2bd41"
+version = "2.33.0"
+
+    [deps.FiniteDiff.extensions]
+    FiniteDiffBandedMatricesExt = "BandedMatrices"
+    FiniteDiffBlockBandedMatricesExt = "BlockBandedMatrices"
+    FiniteDiffSparseArraysExt = "SparseArrays"
+    FiniteDiffStaticArraysExt = "StaticArrays"
+
+    [deps.FiniteDiff.weakdeps]
+    BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
+    BlockBandedMatrices = "ffab5731-97b5-5995-9138-79e8c1846df0"
+    SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+    StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[[deps.FixedArguments]]
+deps = ["TupleTools"]
+git-tree-sha1 = "befa1ad59c77643dec6fc20d71fd6f5c3afcdadd"
+uuid = "4130a065-6d82-41fe-881e-7a5c65156f7d"
+version = "0.1.1"
+
+[[deps.FixedPointNumbers]]
+deps = ["Random", "Statistics"]
+git-tree-sha1 = "59af96b98217c6ef4ae0dfe065ac7c20831d1a84"
+uuid = "53c48c17-4a7d-5ca2-90c5-79b7896eea93"
+version = "0.8.6"
+
+[[deps.Fontconfig_jll]]
+deps = ["Artifacts", "Bzip2_jll", "Expat_jll", "FreeType2_jll", "JLLWrappers", "Libdl", "Libuuid_jll", "Zlib_jll"]
+git-tree-sha1 = "f85dac9a96a01087df6e3a749840015a0ca3817d"
+uuid = "a3f928ae-7b40-5064-980b-68af3947d34b"
+version = "2.17.1+0"
+
+[[deps.Format]]
+git-tree-sha1 = "9c68794ef81b08086aeb32eeaf33531668d5f5fc"
+uuid = "1fa38f19-a742-5d3f-a2b9-30dd87b9d5f8"
+version = "1.3.7"
+
+[[deps.ForwardDiff]]
+deps = ["CommonSubexpressions", "DiffResults", "DiffRules", "LinearAlgebra", "LogExpFunctions", "NaNMath", "Preferences", "Printf", "Random", "SpecialFunctions"]
+git-tree-sha1 = "1b86cca764a61dcac4fef4c5e16e378e5ed6953c"
+uuid = "f6369f11-7733-5829-9624-2563aa707210"
+version = "1.4.5"
+weakdeps = ["StaticArrays"]
+
+    [deps.ForwardDiff.extensions]
+    ForwardDiffStaticArraysExt = "StaticArrays"
+
+[[deps.FreeType2_jll]]
+deps = ["Artifacts", "Bzip2_jll", "JLLWrappers", "Libdl", "Zlib_jll"]
+git-tree-sha1 = "70329abc09b886fd2c5d94ad2d9527639c421e3e"
+uuid = "d7e528f0-a631-5988-bf34-fe36492bcfd7"
+version = "2.14.3+1"
+
+[[deps.FriBidi_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "7a214fdac5ed5f59a22c2d9a885a16da1c74bbc7"
+uuid = "559328eb-81f9-559d-9380-de523a88c83c"
+version = "1.0.17+0"
+
+[[deps.FunctionMaps]]
+deps = ["CompositeTypes", "LinearAlgebra", "StaticArrays"]
+git-tree-sha1 = "31bd99a57edf98990d1c21486032963955450e8d"
+uuid = "a85aefff-f8ca-4649-a888-c8e5398bc76c"
+version = "0.1.2"
+
+[[deps.Future]]
+deps = ["Random"]
+uuid = "9fa8497b-333b-5362-9e8d-4d0656e87820"
+version = "1.11.0"
+
+[[deps.GLFW_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Libglvnd_jll", "Xorg_libXcursor_jll", "Xorg_libXi_jll", "Xorg_libXinerama_jll", "Xorg_libXrandr_jll", "libdecor_jll", "xkbcommon_jll"]
+git-tree-sha1 = "64bbbb7d1499297751b536dd39c58b20750ab1db"
+uuid = "0656b61e-2033-5cc2-a64a-77c0f6c09b89"
+version = "3.5.1+0"
+
+[[deps.GR]]
+deps = ["Artifacts", "Base64", "DelimitedFiles", "Downloads", "GR_jll", "JSON", "Libdl", "LinearAlgebra", "Preferences", "Printf", "Qt6Wayland_jll", "Random", "Serialization", "Sockets", "TOML", "Tar", "Test", "p7zip_jll"]
+git-tree-sha1 = "4d777f73c46b46b8b5276206059cf8a195499314"
+uuid = "28b8d3ca-fb5f-59d9-8090-bfdbd6d07a71"
+version = "0.73.27"
+
+    [deps.GR.extensions]
+    IJuliaExt = "IJulia"
+
+    [deps.GR.weakdeps]
+    IJulia = "7073ff75-c697-5162-941a-fcdaad2a7d2a"
+
+[[deps.GR_jll]]
+deps = ["Artifacts", "Bzip2_jll", "Cairo_jll", "FFMPEG_jll", "Fontconfig_jll", "FreeType2_jll", "GLFW_jll", "JLLWrappers", "JpegTurbo_jll", "Libdl", "Libtiff_jll", "Pixman_jll", "Qt6Base_jll", "Zlib_jll", "libpng_jll"]
+git-tree-sha1 = "f8eb8f7ba13ea75083531647fc8faeda8d541f07"
+uuid = "d2c73de3-f751-5644-a686-071e5b155ba9"
+version = "0.73.27+0"
+
+[[deps.Gamma]]
+git-tree-sha1 = "86f86b6168a016ed88e4ae4e64577b98c3b59e8e"
+uuid = "a0844989-3bd2-4988-8bea-c9407ab0941b"
+version = "1.1.0"
+
+[[deps.GaussQuadrature]]
+deps = ["SpecialFunctions"]
+git-tree-sha1 = "eb6f1f48aa994f3018cbd029a17863c6535a266d"
+uuid = "d54b0c1a-921d-58e0-8e36-89d8069c0969"
+version = "0.5.8"
+
+[[deps.GettextRuntime_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Libiconv_jll"]
+git-tree-sha1 = "45288942190db7c5f760f59c04495064eedf9340"
+uuid = "b0724c58-0f36-5564-988d-3bb0596ebc4a"
+version = "0.22.4+0"
+
+[[deps.Ghostscript_jll]]
+deps = ["Artifacts", "JLLWrappers", "JpegTurbo_jll", "Libdl", "Zlib_jll"]
+git-tree-sha1 = "38044a04637976140074d0b0621c1edf0eb531fd"
+uuid = "61579ee1-b43e-5ca0-a5da-69d92c66a64b"
+version = "9.55.1+0"
+
+[[deps.Glib_jll]]
+deps = ["Artifacts", "GettextRuntime_jll", "JLLWrappers", "Libdl", "Libffi_jll", "Libiconv_jll", "Libmount_jll", "PCRE2_jll", "Zlib_jll"]
+git-tree-sha1 = "090526e65de8f69648ac156daae153de8b56df62"
+uuid = "7746bdde-850d-59dc-9ae8-88ece973131d"
+version = "2.88.3+0"
+
+[[deps.GraphPPL]]
+deps = ["BitSetTuples", "DataStructures", "Dictionaries", "MacroTools", "MetaGraphsNext", "NamedTupleTools", "Static", "StaticArrays", "TupleTools", "Unrolled"]
+git-tree-sha1 = "ea4b12cf4e8b76e4c075898724b37915808cace1"
+uuid = "b3f8163a-e979-4e85-b43e-1f63d8c8b42c"
+version = "4.8.0"
+
+    [deps.GraphPPL.extensions]
+    GraphPPLDistributionsExt = "Distributions"
+    GraphPPLGraphVizExt = "GraphViz"
+    GraphPPLPlottingExt = ["Cairo", "GraphPlot"]
+
+    [deps.GraphPPL.weakdeps]
+    Cairo = "159f3aea-2a34-519c-b102-8c37f9878175"
+    Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+    GraphPlot = "a2cc645c-3eea-5389-862e-a155d0052231"
+    GraphViz = "f526b714-d49f-11e8-06ff-31ed36ee7ee0"
+
+[[deps.Graphite2_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "69ffb934a5c5b7e086a0b4fee3427db2556fba6e"
+uuid = "3b182d85-2403-5c21-9c21-1e1f0cc25472"
+version = "1.3.16+0"
+
+[[deps.Graphs]]
+deps = ["ArnoldiMethod", "DataStructures", "Inflate", "LinearAlgebra", "Random", "SimpleTraits", "SparseArrays", "Statistics"]
+git-tree-sha1 = "7eb45fe833a5b7c51cf6d89c5a841d5967e44be3"
+uuid = "86223c79-3864-5bf0-83f7-82e725a168b6"
+version = "1.14.0"
+
+    [deps.Graphs.extensions]
+    GraphsSharedArraysExt = "SharedArrays"
+
+    [deps.Graphs.weakdeps]
+    Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+    SharedArrays = "1a1011a3-84de-559e-8e89-a11a2f7dc383"
+
+[[deps.HCubature]]
+deps = ["Combinatorics", "DataStructures", "LinearAlgebra", "QuadGK", "StaticArrays"]
+git-tree-sha1 = "8ee627fb73ecba0b5254158b04d4745611b404a1"
+uuid = "19dc6840-f33b-545b-b366-655c7e3ffd49"
+version = "1.8.0"
+
+[[deps.HTTP]]
+deps = ["Base64", "CodecZlib", "ConcurrentUtilities", "Dates", "ExceptionUnwrapping", "Logging", "LoggingExtras", "MbedTLS", "NetworkOptions", "OpenSSL", "PrecompileTools", "Random", "SimpleBufferStream", "Sockets", "URIs", "UUIDs"]
+git-tree-sha1 = "51059d23c8bb67911a2e6fd5130229113735fc7e"
+uuid = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+version = "1.11.0"
+
+[[deps.HarfBuzz_jll]]
+deps = ["Artifacts", "Cairo_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll", "Graphite2_jll", "JLLWrappers", "Libdl", "Libffi_jll"]
+git-tree-sha1 = "c3f99f8e7c98031b8845ece9db86dca713ab9bf8"
+uuid = "2e76f6c2-a576-52d4-95c1-20adfe4de566"
+version = "100.14003.0+0"
+
+[[deps.HashArrayMappedTries]]
+git-tree-sha1 = "2eaa69a7cab70a52b9687c8bf950a5a93ec895ae"
+uuid = "076d061b-32b6-4027-95e0-9a2c6f6d7e74"
+version = "0.2.0"
+
+[[deps.HypergeometricFunctions]]
+deps = ["Gamma", "LinearAlgebra"]
+git-tree-sha1 = "31bb6c92405c084617facc1d7ed9eb6c402d061e"
+uuid = "34004b35-14d8-5ef3-9330-4cdb6864b03a"
+version = "0.3.30"
+
+[[deps.Hyperscript]]
+deps = ["Test"]
+git-tree-sha1 = "179267cfa5e712760cd43dcae385d7ea90cc25a4"
+uuid = "47d2ed2b-36de-50cf-bf87-49c2cf4b8b91"
+version = "0.0.5"
+
+[[deps.HypertextLiteral]]
+deps = ["Tricks"]
+git-tree-sha1 = "d1a86724f81bcd184a38fd284ce183ec067d71a0"
+uuid = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
+version = "1.0.0"
+
+[[deps.IOCapture]]
+deps = ["Logging", "Random"]
+git-tree-sha1 = "0ee181ec08df7d7c911901ea38baf16f755114dc"
+uuid = "b5f81e59-6552-4d32-b1f0-c071b021bf89"
+version = "1.0.0"
+
+[[deps.IfElse]]
+git-tree-sha1 = "debdd00ffef04665ccbb3e150747a77560e8fad1"
+uuid = "615f187c-cbe4-4ef1-ba3b-2fcf58d6d173"
+version = "0.1.1"
+
+[[deps.Indexing]]
+git-tree-sha1 = "ce1566720fd6b19ff3411404d4b977acd4814f9f"
+uuid = "313cdc1a-70c2-5d6a-ae34-0150d3930a38"
+version = "1.1.1"
+
+[[deps.Inflate]]
+git-tree-sha1 = "d1b1b796e47d94588b3757fe84fbf65a5ec4a80d"
+uuid = "d25df0c9-e2be-5dd7-82c8-3ad0b3e990b9"
+version = "0.1.5"
+
+[[deps.InteractiveUtils]]
+deps = ["Markdown"]
+uuid = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+version = "1.11.0"
+
+[[deps.IntervalSets]]
+git-tree-sha1 = "79d6bd28c8d9bccc2229784f1bd637689b256377"
+uuid = "8197267c-284f-5f27-9208-e0e47529a953"
+version = "0.7.14"
+weakdeps = ["Random", "RecipesBase", "Statistics"]
+
+    [deps.IntervalSets.extensions]
+    IntervalSetsRandomExt = "Random"
+    IntervalSetsRecipesBaseExt = "RecipesBase"
+    IntervalSetsStatisticsExt = "Statistics"
+
+[[deps.InverseFunctions]]
+git-tree-sha1 = "a779299d77cd080bf77b97535acecd73e1c5e5cb"
+uuid = "3587e190-3f89-42d0-90ee-14403ec27112"
+version = "0.1.17"
+weakdeps = ["Dates", "Test"]
+
+    [deps.InverseFunctions.extensions]
+    InverseFunctionsDatesExt = "Dates"
+    InverseFunctionsTestExt = "Test"
+
+[[deps.IrrationalConstants]]
+git-tree-sha1 = "b2d91fe939cae05960e760110b328288867b5758"
+uuid = "92d709cd-6900-40b7-9082-c6be49f344b6"
+version = "0.2.6"
+
+[[deps.JLD2]]
+deps = ["ChunkCodecLibZlib", "ChunkCodecLibZstd", "FileIO", "MacroTools", "Mmap", "OrderedCollections", "PrecompileTools", "ScopedValues"]
+git-tree-sha1 = "877edc1d2f51adcef0bfacd19464a19e7cfddddb"
+uuid = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+version = "0.6.6"
+
+    [deps.JLD2.extensions]
+    UnPackExt = "UnPack"
+
+    [deps.JLD2.weakdeps]
+    UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
+
+[[deps.JLFzf]]
+deps = ["REPL", "Random", "fzf_jll"]
+git-tree-sha1 = "82f7acdc599b65e0f8ccd270ffa1467c21cb647b"
+uuid = "1019f520-868f-41f5-a6de-eb00f4b6a39c"
+version = "0.1.11"
+
+[[deps.JLLWrappers]]
+deps = ["Artifacts", "Preferences"]
+git-tree-sha1 = "7204148362dafe5fe6a273f855b8ccbe4df8173e"
+uuid = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
+version = "1.8.0"
+
+[[deps.JSON]]
+deps = ["Dates", "Logging", "Parsers", "PrecompileTools", "StructUtils", "UUIDs", "Unicode"]
+git-tree-sha1 = "c7345ab1a7ca4dc8a02c9f6510da0d9857bbe513"
+uuid = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+version = "1.7.1"
+
+    [deps.JSON.extensions]
+    JSONArrowExt = ["ArrowTypes"]
+
+    [deps.JSON.weakdeps]
+    ArrowTypes = "31f734f8-188a-4ce0-8406-c8a06bd891cd"
+
+[[deps.JpegTurbo_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "037babc10853eeb8e585418922246cb97b8e5b74"
+uuid = "aacddb02-875f-59d6-b918-886e6ef4fbf8"
+version = "3.2.0+1"
+
+[[deps.LAME_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "059aabebaa7c82ccb853dd4a0ee9d17796f7e1bc"
+uuid = "c1c5ebd0-6772-5130-a774-d5fcae4a789d"
+version = "3.100.3+0"
+
+[[deps.LERC_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "17b94ecafcfa45e8360a4fc9ca6b583b049e4e37"
+uuid = "88015f11-f218-50d7-93a8-a6af411a945d"
+version = "4.1.0+0"
+
+[[deps.LLVMOpenMP_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "b7970cef8ae1c990ba0c09cd8bdc1145e006632f"
+uuid = "1d63c593-3942-5779-bab2-d838dc0a180e"
+version = "22.1.7+0"
+
+[[deps.LaTeXStrings]]
+git-tree-sha1 = "f88f3ccef05a6a72a0cf0ed417c8fd68530f4ab2"
+uuid = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
+version = "1.4.1"
+
+[[deps.Latexify]]
+deps = ["Format", "Ghostscript_jll", "InteractiveUtils", "LaTeXStrings", "MacroTools", "Markdown", "OrderedCollections", "Requires"]
+git-tree-sha1 = "df7566479bd64f20bd16b09960145e70160ffb3b"
+uuid = "23fbe1c1-3f47-55db-b15f-69d7ec21a316"
+version = "0.16.12"
+
+    [deps.Latexify.extensions]
+    DataFramesExt = "DataFrames"
+    SparseArraysExt = "SparseArrays"
+    SymEngineExt = "SymEngine"
+    TectonicExt = "tectonic_jll"
+
+    [deps.Latexify.weakdeps]
+    DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+    SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+    SymEngine = "123dc426-2d89-5057-bbad-38513e3affd8"
+    tectonic_jll = "d7dd28d6-a5e6-559c-9131-7eb760cdacc5"
+
+[[deps.LazyArrays]]
+deps = ["ArrayLayouts", "FillArrays", "LinearAlgebra", "MacroTools", "SparseArrays"]
+git-tree-sha1 = "139050e54e3a565fe457c92f5c1b7a213701a5e7"
+uuid = "5078a376-72f3-5289-bfd5-ec5146d43c02"
+version = "2.12.0"
+
+    [deps.LazyArrays.extensions]
+    LazyArraysBandedMatricesExt = "BandedMatrices"
+    LazyArraysBlockArraysExt = "BlockArrays"
+    LazyArraysBlockBandedMatricesExt = "BlockBandedMatrices"
+    LazyArraysStaticArraysExt = "StaticArrays"
+
+    [deps.LazyArrays.weakdeps]
+    BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
+    BlockArrays = "8e7c35d0-a365-5155-bbbb-fb81a777f24e"
+    BlockBandedMatrices = "ffab5731-97b5-5995-9138-79e8c1846df0"
+    StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[[deps.LibCURL]]
+deps = ["LibCURL_jll", "MozillaCACerts_jll"]
+uuid = "b27032c2-a3e7-50c8-80cd-2d36dbcbfd21"
+version = "0.6.4"
+
+[[deps.LibCURL_jll]]
+deps = ["Artifacts", "LibSSH2_jll", "Libdl", "MbedTLS_jll", "Zlib_jll", "nghttp2_jll"]
+uuid = "deac9b47-8bc7-5906-a0fe-35ac56dc84c0"
+version = "8.6.0+0"
+
+[[deps.LibGit2]]
+deps = ["Base64", "LibGit2_jll", "NetworkOptions", "Printf", "SHA"]
+uuid = "76f85450-5226-5b5a-8eaa-529ad045b433"
+version = "1.11.0"
+
+[[deps.LibGit2_jll]]
+deps = ["Artifacts", "LibSSH2_jll", "Libdl", "MbedTLS_jll"]
+uuid = "e37daf67-58a4-590a-8e99-b0245dd2ffc5"
+version = "1.7.2+0"
+
+[[deps.LibSSH2_jll]]
+deps = ["Artifacts", "Libdl", "MbedTLS_jll"]
+uuid = "29816b5a-b9ab-546f-933c-edad1886dfa8"
+version = "1.11.0+1"
+
+[[deps.Libdl]]
+uuid = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+version = "1.11.0"
+
+[[deps.Libffi_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "c8da7e6a91781c41a863611c7e966098d783c57a"
+uuid = "e9f186c6-92d2-5b65-8a66-fee21dc1b490"
+version = "3.4.7+0"
+
+[[deps.Libglvnd_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libX11_jll", "Xorg_libXext_jll"]
+git-tree-sha1 = "d36c21b9e7c172a44a10484125024495e2625ac0"
+uuid = "7e76a0d4-f3c7-5321-8279-8d96eeed0f29"
+version = "1.7.1+1"
+
+[[deps.Libiconv_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "be484f5c92fad0bd8acfef35fe017900b0b73809"
+uuid = "94ce4f54-9a6c-5748-9c1c-f9c7231a4531"
+version = "1.18.0+0"
+
+[[deps.Libmount_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "cc3ad4faf30015a3e8094c9b5b7f19e85bdf2386"
+uuid = "4b2f31a3-9ecc-558c-b454-b3730dcb73e9"
+version = "2.42.0+0"
+
+[[deps.Libtiff_jll]]
+deps = ["Artifacts", "JLLWrappers", "JpegTurbo_jll", "LERC_jll", "Libdl", "XZ_jll", "Zlib_jll", "Zstd_jll"]
+git-tree-sha1 = "aebd334d06cee9f24cea70bd19a39749daf73881"
+uuid = "89763e89-9b03-5906-acba-b20f662cd828"
+version = "4.7.3+0"
+
+[[deps.Libuuid_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "d620582b1f0cbe2c72dd1d5bd195a9ce73370ab1"
+uuid = "38a345b3-de98-5d2b-a5d3-14cd9215e700"
+version = "2.42.0+0"
+
+[[deps.LineSearches]]
+deps = ["LinearAlgebra", "NLSolversBase", "NaNMath", "Printf"]
+git-tree-sha1 = "b4f9762e3ad693626ffd51ae4be359c0a7b08469"
+uuid = "d3d80556-e9d4-5f37-9878-2ab0fcc64255"
+version = "7.8.1"
+
+[[deps.LinearAlgebra]]
+deps = ["Libdl", "OpenBLAS_jll", "libblastrampoline_jll"]
+uuid = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+version = "1.11.0"
+
+[[deps.LogExpFunctions]]
+deps = ["DocStringExtensions", "IrrationalConstants", "LinearAlgebra"]
+git-tree-sha1 = "13ca9e2586b89836fd20cccf56e57e2b9ae7f38f"
+uuid = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
+version = "0.3.29"
+
+    [deps.LogExpFunctions.extensions]
+    LogExpFunctionsChainRulesCoreExt = "ChainRulesCore"
+    LogExpFunctionsChangesOfVariablesExt = "ChangesOfVariables"
+    LogExpFunctionsInverseFunctionsExt = "InverseFunctions"
+
+    [deps.LogExpFunctions.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    ChangesOfVariables = "9e997f8a-9a97-42d5-a9f1-ce6bfc15e2c0"
+    InverseFunctions = "3587e190-3f89-42d0-90ee-14403ec27112"
+
+[[deps.Logging]]
+uuid = "56ddb016-857b-54e1-b83d-db4d58db5568"
+version = "1.11.0"
+
+[[deps.LoggingExtras]]
+deps = ["Dates", "Logging"]
+git-tree-sha1 = "f00544d95982ea270145636c181ceda21c4e2575"
+uuid = "e6f89c97-d47a-5376-807f-9c37f3926c36"
+version = "1.2.0"
+
+[[deps.MIMEs]]
+git-tree-sha1 = "c64d943587f7187e751162b3b84445bbbd79f691"
+uuid = "6c6e2e6c-3030-632d-7369-2d6c69616d65"
+version = "1.1.0"
+
+[[deps.MacroTools]]
+git-tree-sha1 = "1e0228a030642014fe5cfe68c2c0a818f9e3f522"
+uuid = "1914dd2f-81c6-5fcd-8719-6d5c9610ff09"
+version = "0.5.16"
+
+[[deps.Markdown]]
+deps = ["Base64"]
+uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
+version = "1.11.0"
+
+[[deps.MatrixCorrectionTools]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "73f93b21eae5714c282396bfae9d9f13d6ad04b6"
+uuid = "41f81499-25de-46de-b591-c3cfc21e9eaf"
+version = "1.2.0"
+
+[[deps.MbedTLS]]
+deps = ["Dates", "MbedTLS_jll", "MozillaCACerts_jll", "NetworkOptions", "Random", "Sockets"]
+git-tree-sha1 = "8785729fa736197687541f7053f6d8ab7fc44f92"
+uuid = "739be429-bea8-5141-9913-cc70e7f3736d"
+version = "1.1.10"
+
+[[deps.MbedTLS_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "c8ffd9c3-330d-5841-b78e-0817d7145fa1"
+version = "2.28.6+0"
+
+[[deps.Measures]]
+git-tree-sha1 = "b513cedd20d9c914783d8ad83d08120702bf2c77"
+uuid = "442fdcdd-2543-5da2-b0f3-8c86c306513e"
+version = "0.3.3"
+
+[[deps.MetaGraphsNext]]
+deps = ["Graphs", "JLD2", "SimpleTraits"]
+git-tree-sha1 = "1983a06112db00c54e171f5cff8788c8efbdae85"
+uuid = "fa8bd995-216d-47f1-8a91-f3b68fbeb377"
+version = "0.7.5"
+
+[[deps.Missings]]
+deps = ["DataAPI"]
+git-tree-sha1 = "ec4f7fbeab05d7747bdf98eb74d130a2a2ed298d"
+uuid = "e1d29d7a-bbdc-5cf2-9ac0-f12de2c33e28"
+version = "1.2.0"
+
+[[deps.Mmap]]
+uuid = "a63ad114-7e13-5084-954f-fe012c677804"
+version = "1.11.0"
+
+[[deps.MozillaCACerts_jll]]
+uuid = "14a3606d-f60d-562e-9121-12d972cd8159"
+version = "2023.12.12"
+
+[[deps.NLSolversBase]]
+deps = ["ADTypes", "DifferentiationInterface", "FiniteDiff", "LinearAlgebra"]
+git-tree-sha1 = "f96d38936d92d610318dec4d3b5ef37b0373c20f"
+uuid = "d41bc354-129a-5804-8e4c-c37616107c6c"
+version = "8.0.1"
+
+[[deps.NaNMath]]
+deps = ["OpenLibm_jll"]
+git-tree-sha1 = "dbd2e8cd2c1c27f0b584f6661b4309609c5a685e"
+uuid = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
+version = "1.1.4"
+
+[[deps.NamedTupleTools]]
+git-tree-sha1 = "90914795fc59df44120fe3fff6742bb0d7adb1d0"
+uuid = "d9ec5142-1e00-5aa0-9d6a-321866360f50"
+version = "0.14.3"
+
+[[deps.NetworkOptions]]
+uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
+version = "1.2.0"
+
+[[deps.Ogg_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "b6aa4566bb7ae78498a5e68943863fa8b5231b59"
+uuid = "e7412a2a-1a6e-54c0-be00-318e2571c051"
+version = "1.3.6+0"
+
+[[deps.OpenBLAS_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "Libdl"]
+uuid = "4536629a-c528-5b80-bd46-f80d51c5b363"
+version = "0.3.27+1"
+
+[[deps.OpenLibm_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "05823500-19ac-5b8b-9628-191a04bc5112"
+version = "0.8.5+0"
+
+[[deps.OpenSSL]]
+deps = ["BitFlags", "Dates", "MozillaCACerts_jll", "NetworkOptions", "OpenSSL_jll", "Sockets"]
+git-tree-sha1 = "1d1aaa7d449b58415f97d2839c318b70ffb525a0"
+uuid = "4d8831e6-92b7-49fb-bdf8-b643e874388c"
+version = "1.6.1"
+
+[[deps.OpenSSL_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "7787087cbc5ec110986e94d9aa1f17639a79c5de"
+uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
+version = "3.5.8+0"
+
+[[deps.OpenSpecFun_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "1346c9208249809840c91b26703912dff463d335"
+uuid = "efe28fd5-8261-553b-a9e1-b2916fc3738e"
+version = "0.5.6+0"
+
+[[deps.Optim]]
+deps = ["ADTypes", "EnumX", "FillArrays", "LineSearches", "LinearAlgebra", "NLSolversBase", "NaNMath", "PositiveFactorizations", "Printf", "SparseArrays", "Statistics"]
+git-tree-sha1 = "ece78ffe4fcee487b858ecaf184b8d7c2a79e015"
+uuid = "429524aa-4258-5aef-a3af-852621145aeb"
+version = "2.3.1"
+
+    [deps.Optim.extensions]
+    OptimMOIExt = "MathOptInterface"
+
+    [deps.Optim.weakdeps]
+    MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
+
+[[deps.Opus_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "e2bb57a313a74b8104064b7efd01406c0a50d2ff"
+uuid = "91d4177d-7536-5919-b921-800302f37372"
+version = "1.6.1+0"
+
+[[deps.OrderedCollections]]
+git-tree-sha1 = "05f45c2e0de6259db764adbfd2f1dc6d3f8de13c"
+uuid = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+version = "2.0.1"
+
+[[deps.PCRE2_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "efcefdf7-47ab-520b-bdef-62a2eaa19f15"
+version = "10.42.0+1"
+
+[[deps.PDMats]]
+deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse"]
+git-tree-sha1 = "123266c25174ef6c8d4718920abc206452cf8de6"
+uuid = "90014a1f-27ba-587c-ab20-58faa44d9150"
+version = "0.11.41"
+weakdeps = ["StatsBase"]
+
+    [deps.PDMats.extensions]
+    StatsBaseExt = "StatsBase"
+
+[[deps.Pango_jll]]
+deps = ["Artifacts", "Cairo_jll", "Fontconfig_jll", "FreeType2_jll", "FriBidi_jll", "Glib_jll", "HarfBuzz_jll", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "1912a9f1b9ca55005b03ba075f8e19993583e237"
+uuid = "36c8627f-9965-5494-a995-c6b170f724f3"
+version = "1.58.2+0"
+
+[[deps.Parsers]]
+deps = ["Dates", "PrecompileTools", "UUIDs"]
+git-tree-sha1 = "ba0dc8a8a67cacac4842631f960c046e4e563675"
+uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
+version = "2.8.8"
+
+[[deps.Pixman_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "LLVMOpenMP_jll", "Libdl"]
+git-tree-sha1 = "e4a6721aa89e62e5d4217c0b21bd714263779dda"
+uuid = "30392449-352a-5448-841d-b1acce4e97dc"
+version = "0.46.4+0"
+
+[[deps.Pkg]]
+deps = ["Artifacts", "Dates", "Downloads", "FileWatching", "LibGit2", "Libdl", "Logging", "Markdown", "Printf", "Random", "SHA", "TOML", "Tar", "UUIDs", "p7zip_jll"]
+uuid = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+version = "1.11.0"
+weakdeps = ["REPL"]
+
+    [deps.Pkg.extensions]
+    REPLExt = "REPL"
+
+[[deps.PlotThemes]]
+deps = ["PlotUtils", "Statistics"]
+git-tree-sha1 = "41031ef3a1be6f5bbbf3e8073f210556daeae5ca"
+uuid = "ccf2f8ad-2431-5c83-bf29-c5338b663b6a"
+version = "3.3.0"
+
+[[deps.PlotUtils]]
+deps = ["ColorSchemes", "Colors", "Dates", "PrecompileTools", "Printf", "Random", "Reexport", "StableRNGs", "Statistics"]
+git-tree-sha1 = "26ca162858917496748aad52bb5d3be4d26a228a"
+uuid = "995b91a9-d308-5afd-9ec6-746e21dbc043"
+version = "1.4.4"
+
+[[deps.Plots]]
+deps = ["Base64", "Contour", "Dates", "Downloads", "FFMPEG", "FixedPointNumbers", "GR", "JLFzf", "JSON", "LaTeXStrings", "Latexify", "LinearAlgebra", "Measures", "NaNMath", "Pkg", "PlotThemes", "PlotUtils", "PrecompileTools", "Printf", "REPL", "Random", "RecipesBase", "RecipesPipeline", "Reexport", "RelocatableFolders", "Requires", "Scratch", "Showoff", "SparseArrays", "Statistics", "StatsBase", "TOML", "UUIDs", "UnicodeFun", "Unzip"]
+git-tree-sha1 = "83bd514e8ff16b5858ac54c53fa0bcf6002a3b00"
+uuid = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+version = "1.41.7"
+
+    [deps.Plots.extensions]
+    FileIOExt = "FileIO"
+    GeometryBasicsExt = "GeometryBasics"
+    IJuliaExt = "IJulia"
+    ImageInTerminalExt = "ImageInTerminal"
+    UnitfulExt = "Unitful"
+
+    [deps.Plots.weakdeps]
+    FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+    GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
+    IJulia = "7073ff75-c697-5162-941a-fcdaad2a7d2a"
+    ImageInTerminal = "d8c32880-2388-543b-8c61-d9f865259254"
+    Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+
+[[deps.PlutoUI]]
+deps = ["AbstractPlutoDingetjes", "Base64", "ColorTypes", "Dates", "Downloads", "FixedPointNumbers", "Hyperscript", "HypertextLiteral", "IOCapture", "InteractiveUtils", "Logging", "MIMEs", "Markdown", "Random", "Reexport", "URIs", "UUIDs"]
+git-tree-sha1 = "e189d0623e7ce9c37389bac17e80aac3b0302e75"
+uuid = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+version = "0.7.83"
+
+[[deps.PolyaGammaHybridSamplers]]
+deps = ["Distributions", "Random", "SpecialFunctions", "StatsFuns"]
+git-tree-sha1 = "9f6139650ff57f9d8528cd809ebc604c7e9738b1"
+uuid = "c636ee4f-4591-4d8c-9fae-2dea21daa433"
+version = "1.2.6"
+
+[[deps.PositiveFactorizations]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "17275485f373e6673f7e7f97051f703ed5b15b20"
+uuid = "85a6dd25-e78a-55b7-8502-1745935b8125"
+version = "0.2.4"
+
+[[deps.PrecompileTools]]
+deps = ["Preferences"]
+git-tree-sha1 = "5aa36f7049a63a1528fe8f7c3f2113413ffd4e1f"
+uuid = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+version = "1.2.1"
+
+[[deps.Preferences]]
+deps = ["TOML"]
+git-tree-sha1 = "8b770b60760d4451834fe79dd483e318eee709c4"
+uuid = "21216c6a-2e73-6563-6e65-726566657250"
+version = "1.5.2"
+
+[[deps.Printf]]
+deps = ["Unicode"]
+uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+version = "1.11.0"
+
+[[deps.ProgressMeter]]
+deps = ["Distributed", "Printf"]
+git-tree-sha1 = "fbb92c6c56b34e1a2c4c36058f68f332bec840e7"
+uuid = "92933f4c-e287-5a05-a399-4b506db050ca"
+version = "1.11.0"
+
+[[deps.PtrArrays]]
+git-tree-sha1 = "4fbbafbc6251b883f4d2705356f3641f3652a7fe"
+uuid = "43287f4e-b6f4-7ad1-bb20-aadabca52c3d"
+version = "1.4.0"
+
+[[deps.Qt6Base_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "Fontconfig_jll", "Glib_jll", "JLLWrappers", "Libdl", "Libglvnd_jll", "OpenSSL_jll", "Vulkan_Loader_jll", "Xorg_libSM_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Xorg_libxcb_jll", "Xorg_xcb_util_cursor_jll", "Xorg_xcb_util_image_jll", "Xorg_xcb_util_keysyms_jll", "Xorg_xcb_util_renderutil_jll", "Xorg_xcb_util_wm_jll", "Zlib_jll", "libinput_jll", "xkbcommon_jll"]
+git-tree-sha1 = "144895f6166994730ee7ff8113b981fc360638f1"
+uuid = "c0090381-4147-56d7-9ebc-da0b1113ec56"
+version = "6.10.2+2"
+
+[[deps.Qt6Declarative_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Qt6Base_jll", "Qt6ShaderTools_jll", "Qt6Svg_jll"]
+git-tree-sha1 = "159d253ab126d5b29230cf53521899bea4ef4648"
+uuid = "629bc702-f1f5-5709-abd5-49b8460ea067"
+version = "6.10.2+2"
+
+[[deps.Qt6ShaderTools_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Qt6Base_jll"]
+git-tree-sha1 = "4d85eedf69d875982c46643f6b4f66919d7e157b"
+uuid = "ce943373-25bb-56aa-8eca-768745ed7b5a"
+version = "6.10.2+1"
+
+[[deps.Qt6Svg_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Qt6Base_jll"]
+git-tree-sha1 = "81587ff5ff25a4e1115ce191e36285ede0334c9d"
+uuid = "6de9746b-f93d-5813-b365-ba18ad4a9cf3"
+version = "6.10.2+0"
+
+[[deps.Qt6Wayland_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Qt6Base_jll", "Qt6Declarative_jll"]
+git-tree-sha1 = "672c938b4b4e3e0169a07a5f227029d4905456f2"
+uuid = "e99dba38-086e-5de3-a5b1-6e4c66e897c3"
+version = "6.10.2+1"
+
+[[deps.QuadGK]]
+deps = ["DataStructures", "LinearAlgebra"]
+git-tree-sha1 = "5e8e8b0ab68215d7a2b14b9921a946fee794749e"
+uuid = "1fd47b50-473d-5c70-9696-f719f8f3bcdc"
+version = "2.11.3"
+
+    [deps.QuadGK.extensions]
+    QuadGKEnzymeExt = "Enzyme"
+
+    [deps.QuadGK.weakdeps]
+    Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+
+[[deps.REPL]]
+deps = ["InteractiveUtils", "Markdown", "Sockets", "StyledStrings", "Unicode"]
+uuid = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
+version = "1.11.0"
+
+[[deps.Random]]
+deps = ["SHA"]
+uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+version = "1.11.0"
+
+[[deps.ReactiveMP]]
+deps = ["BayesBase", "DiffResults", "Distributions", "DomainIntegrals", "DomainSets", "ExponentialFamily", "FastCholesky", "FastGaussQuadrature", "FixedArguments", "ForwardDiff", "HCubature", "LazyArrays", "LinearAlgebra", "MacroTools", "MatrixCorrectionTools", "Optim", "PolyaGammaHybridSamplers", "PositiveFactorizations", "Random", "Rocket", "SpecialFunctions", "StatsBase", "StatsFuns", "TinyHugeNumbers", "Tullio", "TupleTools", "UUIDs"]
+git-tree-sha1 = "63be483a6f5566016e85c5a5db36934393313ee9"
+uuid = "a194aa59-28ba-4574-a09c-4a745416d6e3"
+version = "6.5.0"
+
+    [deps.ReactiveMP.extensions]
+    ReactiveMPOptimisersExt = "Optimisers"
+    ReactiveMPProjectionExt = "ExponentialFamilyProjection"
+
+    [deps.ReactiveMP.weakdeps]
+    ExponentialFamilyProjection = "17f509fa-9a96-44ba-99b2-1c5f01f0931b"
+    Optimisers = "3bd65402-5787-11e9-1adc-39752487f4e2"
+
+[[deps.RecipesBase]]
+deps = ["PrecompileTools"]
+git-tree-sha1 = "5c3d09cc4f31f5fc6af001c250bf1278733100ff"
+uuid = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
+version = "1.3.4"
+
+[[deps.RecipesPipeline]]
+deps = ["Dates", "NaNMath", "PlotUtils", "PrecompileTools", "RecipesBase"]
+git-tree-sha1 = "45cf9fd0ca5839d06ef333c8201714e888486342"
+uuid = "01d81517-befc-4cb6-b9ec-a95719d0359c"
+version = "0.6.12"
+
+[[deps.Reexport]]
+git-tree-sha1 = "45e428421666073eab6f2da5c9d310d99bb12f9b"
+uuid = "189a3867-3050-52da-a836-e630ba90ab69"
+version = "1.2.2"
+
+[[deps.RelocatableFolders]]
+deps = ["SHA", "Scratch"]
+git-tree-sha1 = "ffdaf70d81cf6ff22c2b6e733c900c3321cab864"
+uuid = "05181044-ff0b-4ac5-8273-598c1e38db00"
+version = "1.0.1"
+
+[[deps.Requires]]
+deps = ["UUIDs"]
+git-tree-sha1 = "62389eeff14780bfe55195b7204c0d8738436d64"
+uuid = "ae029012-a4dd-5104-9daa-d747884805df"
+version = "1.3.1"
+
+[[deps.Rmath]]
+deps = ["Random", "Rmath_jll"]
+git-tree-sha1 = "5b3d50eb374cea306873b371d3f8d3915a018f0b"
+uuid = "79098fc4-a85e-5d69-aa6a-4863f24498fa"
+version = "0.9.0"
+
+[[deps.Rmath_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "6d40b2fe70437b01397d2a4d5b020008da4e7019"
+uuid = "f50d1b31-88e8-58de-be2c-1cc44531875f"
+version = "0.5.2+0"
+
+[[deps.Rocket]]
+deps = ["DataStructures", "Sockets", "Unrolled"]
+git-tree-sha1 = "379953ebbd24704e7b669eaaaae9ec3521de9712"
+uuid = "df971d30-c9d6-4b37-b8ff-e965b2cb3a40"
+version = "1.10.0"
+
+    [deps.Rocket.extensions]
+    RocketObservablesExt = "Observables"
+
+    [deps.Rocket.weakdeps]
+    Observables = "510215fc-4207-5dde-b226-833fc4488ee2"
+
+[[deps.Roots]]
+deps = ["Accessors", "CommonSolve", "Printf"]
+git-tree-sha1 = "4db094d5e079abbda658acfe1c4d098430417717"
+uuid = "f2b01f46-fcfa-551c-844a-d8ac1e96c665"
+version = "3.0.8"
+
+    [deps.Roots.extensions]
+    RootsChainRulesCoreExt = "ChainRulesCore"
+    RootsForwardDiffExt = "ForwardDiff"
+    RootsIntervalRootFindingExt = "IntervalRootFinding"
+    RootsSymPyExt = "SymPy"
+    RootsSymPyPythonCallExt = "SymPyPythonCall"
+    RootsUnitfulExt = "Unitful"
+
+    [deps.Roots.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+    IntervalRootFinding = "d2bf35a9-74e0-55ec-b149-d360ff49b807"
+    SymPy = "24249f21-da20-56a4-8eb1-6a02cf4ae2e6"
+    SymPyPythonCall = "bc8888f7-b21e-4b7c-a06a-5d9c9496438c"
+    Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+
+[[deps.RxInfer]]
+deps = ["Base64", "BayesBase", "DataStructures", "Dates", "Distributions", "DomainSets", "ExponentialFamily", "FastCholesky", "GraphPPL", "HTTP", "JSON", "LinearAlgebra", "Logging", "MacroTools", "Optim", "Preferences", "ProgressMeter", "Random", "ReactiveMP", "Reexport", "Rocket", "SparseArrays", "Static", "Statistics", "TupleTools", "UUIDs"]
+git-tree-sha1 = "2899c495ba3c3ba4f400388ed67a9e59ae47eb99"
+uuid = "86711068-29c9-4ff7-b620-ae75d7495b3d"
+version = "5.5.2"
+
+    [deps.RxInfer.extensions]
+    PrettyTablesExt = "PrettyTables"
+    ProjectionExt = "ExponentialFamilyProjection"
+    TensorBoardLoggerExt = "TensorBoardLogger"
+
+    [deps.RxInfer.weakdeps]
+    ExponentialFamilyProjection = "17f509fa-9a96-44ba-99b2-1c5f01f0931b"
+    PrettyTables = "08abe8d2-0d0c-5749-adfa-8a2ac140af0d"
+    TensorBoardLogger = "899adc3e-224a-11e9-021f-63837185c80f"
+
+[[deps.SHA]]
+uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+version = "0.7.0"
+
+[[deps.SciMLPublic]]
+deps = ["PrecompileTools"]
+git-tree-sha1 = "74685afb51732a464fbce79a72708f7c4203ceb7"
+uuid = "431bcebd-1456-4ced-9d72-93c2757fff0b"
+version = "1.3.0"
+
+[[deps.ScopedValues]]
+deps = ["HashArrayMappedTries", "Logging"]
+git-tree-sha1 = "67a144433c4ce877ee6d1ada69a124d6b1ecf7be"
+uuid = "7e506255-f358-4e82-b7e4-beb19740aa63"
+version = "1.6.2"
+
+[[deps.Scratch]]
+deps = ["Dates"]
+git-tree-sha1 = "9b81b8393e50b7d4e6d0a9f14e192294d3b7c109"
+uuid = "6c6a2e73-6563-6170-7368-637461726353"
+version = "1.3.0"
+
+[[deps.Serialization]]
+uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+version = "1.11.0"
+
+[[deps.Setfield]]
+deps = ["ConstructionBase", "Future", "MacroTools", "StaticArraysCore"]
+git-tree-sha1 = "c5391c6ace3bc430ca630251d02ea9687169ca68"
+uuid = "efcf1570-3423-57d1-acb7-fd33fddbac46"
+version = "1.1.2"
+
+[[deps.Showoff]]
+deps = ["Dates"]
+git-tree-sha1 = "8238217340ad0aaabe11afe39c1098b5bc9f4c8e"
+uuid = "992d4aef-0814-514b-bc4d-f2e9a6c4116f"
+version = "1.1.1"
+
+[[deps.SimpleBufferStream]]
+git-tree-sha1 = "f305871d2f381d21527c770d4788c06c097c9bc1"
+uuid = "777ac1f9-54b0-4bf8-805c-2214025038e7"
+version = "1.2.0"
+
+[[deps.SimpleTraits]]
+deps = ["InteractiveUtils", "MacroTools"]
+git-tree-sha1 = "7ddb0b49c109481b046972c0e4ab02b2127d6a75"
+uuid = "699a6c99-e7fa-54fc-8d76-47d257e15c1d"
+version = "0.9.6"
+
+[[deps.Sockets]]
+uuid = "6462fe0b-24de-5631-8697-dd941f90decc"
+version = "1.11.0"
+
+[[deps.SortingAlgorithms]]
+deps = ["DataStructures"]
+git-tree-sha1 = "13cd91cc9be159e3f4d95b857fa2aa383b53772a"
+uuid = "a2af1166-a08f-5f64-846c-94a0d3cef48c"
+version = "1.2.3"
+
+[[deps.SparseArrays]]
+deps = ["Libdl", "LinearAlgebra", "Random", "Serialization", "SuiteSparse_jll"]
+uuid = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+version = "1.11.0"
+
+[[deps.SpecialFunctions]]
+deps = ["IrrationalConstants", "LogExpFunctions", "OpenLibm_jll", "OpenSpecFun_jll"]
+git-tree-sha1 = "429071b23f4c9a13fb6582f807cc2ef454082408"
+uuid = "276daf66-3868-5448-9aa4-cd146d93841b"
+version = "2.9.0"
+
+    [deps.SpecialFunctions.extensions]
+    SpecialFunctionsChainRulesCoreExt = "ChainRulesCore"
+
+    [deps.SpecialFunctions.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+
+[[deps.StableRNGs]]
+deps = ["Random"]
+git-tree-sha1 = "4f96c596b8c8258cc7d3b19797854d368f243ddc"
+uuid = "860ef19b-820b-49d6-a774-d7a799459cd3"
+version = "1.0.4"
+
+[[deps.Static]]
+deps = ["CommonWorldInvalidations", "IfElse", "PrecompileTools", "SciMLPublic"]
+git-tree-sha1 = "474a5283ad435618090122872eea6a8165ea6bcf"
+uuid = "aedffcd0-7271-4cad-89d0-dc628f76c6d3"
+version = "1.4.6"
+
+[[deps.StaticArrays]]
+deps = ["LinearAlgebra", "PrecompileTools", "Random", "StaticArraysCore"]
+git-tree-sha1 = "e206cf4850fd7ac4255ffd2b98922f563e18ac53"
+uuid = "90137ffa-7385-5640-81b9-e52037218182"
+version = "1.9.20"
+
+    [deps.StaticArrays.extensions]
+    StaticArraysChainRulesCoreExt = "ChainRulesCore"
+    StaticArraysStatisticsExt = "Statistics"
+
+    [deps.StaticArrays.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[[deps.StaticArraysCore]]
+git-tree-sha1 = "6ab403037779dae8c514bad259f32a447262455a"
+uuid = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
+version = "1.4.4"
+
+[[deps.Statistics]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "e2b53ce13a53367e96601081e33d34746b571bad"
+uuid = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+version = "1.11.5"
+weakdeps = ["SparseArrays"]
+
+    [deps.Statistics.extensions]
+    SparseArraysExt = ["SparseArrays"]
+
+[[deps.StatsAPI]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "178ed29fd5b2a2cfc3bd31c13375ae925623ff36"
+uuid = "82ae8749-77ed-4fe6-ae5f-f523153014b0"
+version = "1.8.0"
+
+[[deps.StatsBase]]
+deps = ["AliasTables", "DataAPI", "DataStructures", "IrrationalConstants", "LinearAlgebra", "LogExpFunctions", "Missings", "Printf", "Random", "SortingAlgorithms", "SparseArrays", "Statistics", "StatsAPI"]
+git-tree-sha1 = "adb9da019510162e67a4493fc235c23203d8b09e"
+uuid = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+version = "0.34.13"
+
+[[deps.StatsFuns]]
+deps = ["HypergeometricFunctions", "IrrationalConstants", "LogExpFunctions", "Reexport", "Rmath", "SpecialFunctions"]
+git-tree-sha1 = "0aa97471d55945556e8d2859568b8317cef98351"
+uuid = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
+version = "1.5.3"
+
+    [deps.StatsFuns.extensions]
+    StatsFunsChainRulesCoreExt = "ChainRulesCore"
+    StatsFunsInverseFunctionsExt = "InverseFunctions"
+
+    [deps.StatsFuns.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    InverseFunctions = "3587e190-3f89-42d0-90ee-14403ec27112"
+
+[[deps.StructUtils]]
+deps = ["Dates", "UUIDs"]
+git-tree-sha1 = "2d0fc55c61321ba245c47be599570d11bac50303"
+uuid = "ec057cc2-7a8d-4b58-b3b3-92acb9f63b42"
+version = "2.8.5"
+
+    [deps.StructUtils.extensions]
+    StructUtilsMeasurementsExt = ["Measurements"]
+    StructUtilsStaticArraysCoreExt = ["StaticArraysCore"]
+    StructUtilsTablesExt = ["Tables"]
+
+    [deps.StructUtils.weakdeps]
+    Measurements = "eff96d63-e80a-5855-80a2-b1b0885c5ab7"
+    StaticArraysCore = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
+    Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+
+[[deps.StyledStrings]]
+uuid = "f489334b-da3d-4c2e-b8f0-e476e12c162b"
+version = "1.11.0"
+
+[[deps.SuiteSparse]]
+deps = ["Libdl", "LinearAlgebra", "Serialization", "SparseArrays"]
+uuid = "4607b0f0-06f3-5cda-b6b1-a6196a1729e9"
+
+[[deps.SuiteSparse_jll]]
+deps = ["Artifacts", "Libdl", "libblastrampoline_jll"]
+uuid = "bea87d4a-7f5b-5778-9afe-8cc45184846c"
+version = "7.7.0+0"
+
+[[deps.TOML]]
+deps = ["Dates"]
+uuid = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+version = "1.0.3"
+
+[[deps.Tar]]
+deps = ["ArgTools", "SHA"]
+uuid = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
+version = "1.10.0"
+
+[[deps.TensorCore]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "1feb45f88d133a655e001435632f019a9a1bcdb6"
+uuid = "62fd8b95-f654-4bbd-a8a5-9c27f68ccd50"
+version = "0.1.1"
+
+[[deps.Test]]
+deps = ["InteractiveUtils", "Logging", "Random", "Serialization"]
+uuid = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+version = "1.11.0"
+
+[[deps.TinyHugeNumbers]]
+git-tree-sha1 = "d5b24fd37550762d78280fb37c1800c3ea7e95cb"
+uuid = "783c9a47-75a3-44ac-a16b-f1ab7b3acf04"
+version = "1.0.4"
+
+[[deps.TranscodingStreams]]
+git-tree-sha1 = "0c45878dcfdcfa8480052b6ab162cdd138781742"
+uuid = "3bb67fe8-82b1-5028-8e26-92a6c54297fa"
+version = "0.11.3"
+
+[[deps.Tricks]]
+git-tree-sha1 = "311349fd1c93a31f783f977a71e8b062a57d4101"
+uuid = "410a4b4d-49e4-4fbc-ab6d-cb71b17b3775"
+version = "0.1.13"
+
+[[deps.Tullio]]
+deps = ["DiffRules", "LinearAlgebra", "Requires"]
+git-tree-sha1 = "de0febfe1243e89f352abd4ca0e9de6c8e6190c5"
+uuid = "bc48ee85-29a4-5162-ae0b-a64e1601d4bc"
+version = "0.3.9"
+
+    [deps.Tullio.extensions]
+    TullioCUDAExt = "CUDA"
+    TullioChainRulesCoreExt = "ChainRulesCore"
+    TullioFillArraysExt = "FillArrays"
+    TullioTrackerExt = "Tracker"
+
+    [deps.Tullio.weakdeps]
+    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    FillArrays = "1a297f60-69ca-5386-bcde-b61e274b549b"
+    Tracker = "9f7883ad-71c0-57eb-9f7f-b5c9e6d3789c"
+
+[[deps.TupleTools]]
+git-tree-sha1 = "41e43b9dc950775eac654b9f845c839cd2f1821e"
+uuid = "9d95972d-f1c8-5527-a6e0-b4b365fa01f6"
+version = "1.6.0"
+
+[[deps.URIs]]
+git-tree-sha1 = "908fec9df6c5de98548ead82a468c95ccf6cd263"
+uuid = "5c2747f8-b7ea-4ff2-ba2e-563bfd36b1d4"
+version = "1.7.0"
+
+[[deps.UUIDs]]
+deps = ["Random", "SHA"]
+uuid = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+version = "1.11.0"
+
+[[deps.Unicode]]
+uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
+version = "1.11.0"
+
+[[deps.UnicodeFun]]
+deps = ["REPL"]
+git-tree-sha1 = "53915e50200959667e78a92a418594b428dffddf"
+uuid = "1cfade01-22cf-5700-b092-accc4b62d6e1"
+version = "0.4.1"
+
+[[deps.Unrolled]]
+deps = ["MacroTools"]
+git-tree-sha1 = "6cc9d682755680e0f0be87c56392b7651efc2c7b"
+uuid = "9602ed7d-8fef-5bc8-8597-8f21381861e8"
+version = "0.1.5"
+
+[[deps.Unzip]]
+git-tree-sha1 = "ca0969166a028236229f63514992fc073799bb78"
+uuid = "41fe7b60-77ed-43a1-b4f0-825fd5a5650d"
+version = "0.2.0"
+
+[[deps.Vulkan_Loader_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Wayland_jll", "Xorg_libX11_jll", "Xorg_libXrandr_jll", "xkbcommon_jll"]
+git-tree-sha1 = "2f0486047a07670caad3a81a075d2e518acc5c59"
+uuid = "a44049a8-05dd-5a78-86c9-5fde0876e88c"
+version = "1.3.243+0"
+
+[[deps.Wayland_jll]]
+deps = ["Artifacts", "EpollShim_jll", "Expat_jll", "JLLWrappers", "Libdl", "Libffi_jll"]
+git-tree-sha1 = "96478df35bbc2f3e1e791bc7a3d0eeee559e60e9"
+uuid = "a2964d1f-97da-50d4-b82a-358c7fce9d89"
+version = "1.24.0+0"
+
+[[deps.XZ_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "b29c22e245d092b8b4e8d3c09ad7baa586d9f573"
+uuid = "ffd25f8a-64ca-5728-b0f7-c24cf3aae800"
+version = "5.8.3+0"
+
+[[deps.Xorg_libICE_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "a3ea76ee3f4facd7a64684f9af25310825ee3668"
+uuid = "f67eecfb-183a-506d-b269-f58e52b52d7c"
+version = "1.1.2+0"
+
+[[deps.Xorg_libSM_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libICE_jll"]
+git-tree-sha1 = "9c7ad99c629a44f81e7799eb05ec2746abb5d588"
+uuid = "c834827a-8449-5923-a945-d239c165b7dd"
+version = "1.2.6+0"
+
+[[deps.Xorg_libX11_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libxcb_jll", "Xorg_xtrans_jll"]
+git-tree-sha1 = "808090ede1d41644447dd5cbafced4731c56bd2f"
+uuid = "4f6342f7-b3d2-589e-9d20-edeb45f2b2bc"
+version = "1.8.13+0"
+
+[[deps.Xorg_libXau_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "aa1261ebbac3ccc8d16558ae6799524c450ed16b"
+uuid = "0c0b7dd1-d40b-584c-a123-a41640f87eec"
+version = "1.0.13+0"
+
+[[deps.Xorg_libXcursor_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libXfixes_jll", "Xorg_libXrender_jll"]
+git-tree-sha1 = "6c74ca84bbabc18c4547014765d194ff0b4dc9da"
+uuid = "935fb764-8cf2-53bf-bb30-45bb1f8bf724"
+version = "1.2.4+0"
+
+[[deps.Xorg_libXdmcp_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "52858d64353db33a56e13c341d7bf44cd0d7b309"
+uuid = "a3789734-cfe1-5b06-b2d0-1dd0d9d62d05"
+version = "1.1.6+0"
+
+[[deps.Xorg_libXext_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libX11_jll"]
+git-tree-sha1 = "1a4a26870bf1e5d26cd585e38038d399d7e65706"
+uuid = "1082639a-0dae-5f34-9b06-72781eeb8cb3"
+version = "1.3.8+0"
+
+[[deps.Xorg_libXfixes_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libX11_jll"]
+git-tree-sha1 = "75e00946e43621e09d431d9b95818ee751e6b2ef"
+uuid = "d091e8ba-531a-589c-9de9-94069b037ed8"
+version = "6.0.2+0"
+
+[[deps.Xorg_libXi_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libXext_jll", "Xorg_libXfixes_jll"]
+git-tree-sha1 = "dcb316b3ce0941f195537dda56bea4517fcd3ff5"
+uuid = "a51aa0fd-4e3c-5386-b890-e753decda492"
+version = "1.8.4+0"
+
+[[deps.Xorg_libXinerama_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libXext_jll"]
+git-tree-sha1 = "0ba01bc7396896a4ace8aab67db31403c71628f4"
+uuid = "d1454406-59df-5ea1-beac-c340f2130bc3"
+version = "1.1.7+0"
+
+[[deps.Xorg_libXrandr_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libXext_jll", "Xorg_libXrender_jll"]
+git-tree-sha1 = "6c174ef70c96c76f4c3f4d3cfbe09d018bcd1b53"
+uuid = "ec84b674-ba8e-5d96-8ba1-2a689ba10484"
+version = "1.5.6+0"
+
+[[deps.Xorg_libXrender_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libX11_jll"]
+git-tree-sha1 = "7ed9347888fac59a618302ee38216dd0379c480d"
+uuid = "ea2f1a96-1ddc-540d-b46f-429655e07cfa"
+version = "0.9.12+0"
+
+[[deps.Xorg_libpciaccess_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Zlib_jll"]
+git-tree-sha1 = "58972370b81423fc546c56a60ed1a009450177c3"
+uuid = "a65dc6b1-eb27-53a1-bb3e-dea574b5389e"
+version = "0.19.0+0"
+
+[[deps.Xorg_libxcb_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libXau_jll", "Xorg_libXdmcp_jll"]
+git-tree-sha1 = "bfcaf7ec088eaba362093393fe11aa141fa15422"
+uuid = "c7cfdc94-dc32-55de-ac96-5a1b8d977c5b"
+version = "1.17.1+0"
+
+[[deps.Xorg_libxkbfile_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libX11_jll"]
+git-tree-sha1 = "ed756a03e95fff88d8f738ebc2849431bdd4fd1a"
+uuid = "cc61e674-0454-545c-8b26-ed2c68acab7a"
+version = "1.2.0+0"
+
+[[deps.Xorg_xcb_util_cursor_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_xcb_util_image_jll", "Xorg_xcb_util_jll", "Xorg_xcb_util_renderutil_jll"]
+git-tree-sha1 = "9750dc53819eba4e9a20be42349a6d3b86c7cdf8"
+uuid = "e920d4aa-a673-5f3a-b3d7-f755a4d47c43"
+version = "0.1.6+0"
+
+[[deps.Xorg_xcb_util_image_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_xcb_util_jll"]
+git-tree-sha1 = "f4fc02e384b74418679983a97385644b67e1263b"
+uuid = "12413925-8142-5f55-bb0e-6d7ca50bb09b"
+version = "0.4.1+0"
+
+[[deps.Xorg_xcb_util_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libxcb_jll"]
+git-tree-sha1 = "68da27247e7d8d8dafd1fcf0c3654ad6506f5f97"
+uuid = "2def613f-5ad1-5310-b15b-b15d46f528f5"
+version = "0.4.1+0"
+
+[[deps.Xorg_xcb_util_keysyms_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_xcb_util_jll"]
+git-tree-sha1 = "44ec54b0e2acd408b0fb361e1e9244c60c9c3dd4"
+uuid = "975044d2-76e6-5fbe-bf08-97ce7c6574c7"
+version = "0.4.1+0"
+
+[[deps.Xorg_xcb_util_renderutil_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_xcb_util_jll"]
+git-tree-sha1 = "5b0263b6d080716a02544c55fdff2c8d7f9a16a0"
+uuid = "0d47668e-0667-5a69-a72c-f761630bfb7e"
+version = "0.3.10+0"
+
+[[deps.Xorg_xcb_util_wm_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_xcb_util_jll"]
+git-tree-sha1 = "f233c83cad1fa0e70b7771e0e21b061a116f2763"
+uuid = "c22f9ab0-d5fe-5066-847c-f4bb1cd4e361"
+version = "0.4.2+0"
+
+[[deps.Xorg_xkbcomp_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libxkbfile_jll"]
+git-tree-sha1 = "801a858fc9fb90c11ffddee1801bb06a738bda9b"
+uuid = "35661453-b289-5fab-8a00-3d9160c6a3a4"
+version = "1.4.7+0"
+
+[[deps.Xorg_xkeyboard_config_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_xkbcomp_jll"]
+git-tree-sha1 = "2e59214e017a55cb87474a00fa76035c82ac0e17"
+uuid = "33bec58e-1273-512f-9401-5d533626f822"
+version = "2.47.0+2"
+
+[[deps.Xorg_xtrans_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "a63799ff68005991f9d9491b6e95bd3478d783cb"
+uuid = "c5fb5394-a638-5e4d-96e5-b29de1b5cf10"
+version = "1.6.0+0"
+
+[[deps.Zlib_jll]]
+deps = ["Libdl"]
+uuid = "83775a58-1f1d-513f-b197-d71354ab007a"
+version = "1.2.13+1"
+
+[[deps.Zstd_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "446b23e73536f84e8037f5dce465e92275f6a308"
+uuid = "3161d3a3-bdf6-5164-811a-617609db77b4"
+version = "1.5.7+1"
+
+[[deps.eudev_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "c3b0e6196d50eab0c5ed34021aaa0bb463489510"
+uuid = "35ca27e7-8b34-5b7f-bca9-bdc33f59eb06"
+version = "3.2.14+0"
+
+[[deps.fzf_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "b6a34e0e0960190ac2a4363a1bd003504772d631"
+uuid = "214eeab7-80f7-51ab-84ad-2988db7cef09"
+version = "0.61.1+0"
+
+[[deps.libaom_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "ef17c47d22224aaecc76e597ab21a072e025cf7b"
+uuid = "a4ae2306-e953-59d6-aa16-d00cac43593b"
+version = "3.14.1+0"
+
+[[deps.libass_jll]]
+deps = ["Artifacts", "Bzip2_jll", "FreeType2_jll", "FriBidi_jll", "HarfBuzz_jll", "JLLWrappers", "Libdl", "Zlib_jll"]
+git-tree-sha1 = "cb007192783c56d8249db4cf0e3495001edfe414"
+uuid = "0ac62f75-1d6f-5e53-bd7c-93b484bb37c0"
+version = "0.17.5+0"
+
+[[deps.libblastrampoline_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "8e850b90-86db-534c-a0d3-1478176c7d93"
+version = "5.11.0+0"
+
+[[deps.libdecor_jll]]
+deps = ["Artifacts", "Dbus_jll", "JLLWrappers", "Libdl", "Libglvnd_jll", "Pango_jll", "Wayland_jll", "xkbcommon_jll"]
+git-tree-sha1 = "9bf7903af251d2050b467f76bdbe57ce541f7f4f"
+uuid = "1183f4f0-6f2a-5f1a-908b-139f9cdfea6f"
+version = "0.2.2+0"
+
+[[deps.libdrm_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libpciaccess_jll"]
+git-tree-sha1 = "28e57478e8a160d346a19c28b3fffb9273bcc9c2"
+uuid = "8e53e030-5e6c-5a89-a30b-be5b7263a166"
+version = "2.4.134+0"
+
+[[deps.libevdev_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "56d643b57b188d30cccc25e331d416d3d358e557"
+uuid = "2db6ffa8-e38f-5e21-84af-90c45d0032cc"
+version = "1.13.4+0"
+
+[[deps.libfdk_aac_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "646634dd19587a56ee2f1199563ec056c5f228df"
+uuid = "f638f0a6-7fb0-5443-88ba-1cc74229b280"
+version = "2.0.4+0"
+
+[[deps.libinput_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "eudev_jll", "libevdev_jll", "mtdev_jll"]
+git-tree-sha1 = "91d05d7f4a9f67205bd6cf395e488009fe85b499"
+uuid = "36db933b-70db-51c0-b978-0f229ee0e533"
+version = "1.28.1+0"
+
+[[deps.libpng_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Zlib_jll"]
+git-tree-sha1 = "e51150d5ab85cee6fc36726850f0e627ad2e4aba"
+uuid = "b53b4c65-9356-5827-b1ea-8c7a1a84506f"
+version = "1.6.58+0"
+
+[[deps.libva_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libX11_jll", "Xorg_libXext_jll", "Xorg_libXfixes_jll", "libdrm_jll"]
+git-tree-sha1 = "7dbf96baae3310fe2fa0df0ccbb3c6288d5816c9"
+uuid = "9a156e7d-b971-5f62-b2c9-67348b8fb97c"
+version = "2.23.0+0"
+
+[[deps.libvorbis_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Ogg_jll"]
+git-tree-sha1 = "11e1772e7f3cc987e9d3de991dd4f6b2602663a5"
+uuid = "f27f6e37-5d2b-51aa-960f-b287f2bc3b7a"
+version = "1.3.8+0"
+
+[[deps.mtdev_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "b4d631fd51f2e9cdd93724ae25b2efc198b059b1"
+uuid = "009596ad-96f7-51b1-9f1b-5ce2d5e8a71e"
+version = "1.1.7+0"
+
+[[deps.nghttp2_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "8e850ede-7688-5339-a07c-302acd2aaf8d"
+version = "1.59.0+0"
+
+[[deps.p7zip_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "3f19e933-33d8-53b3-aaab-bd5110c3b7a0"
+version = "17.4.0+2"
+
+[[deps.x264_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "14cc7083fc6dff3cc44f2bc435ee96d06ed79aa7"
+uuid = "1270edf5-f2f9-52d2-97e9-ab00b5d0237a"
+version = "10164.0.1+0"
+
+[[deps.x265_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "e7b67590c14d487e734dcb925924c5dc43ec85f3"
+uuid = "dfaa095f-4041-5dcd-9319-2fabd8486b76"
+version = "4.1.0+0"
+
+[[deps.xkbcommon_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libxcb_jll", "Xorg_xkeyboard_config_jll"]
+git-tree-sha1 = "a1fc6507a40bf504527d0d4067d718f8e179b2b8"
+uuid = "d8fb68d0-12a3-5cfd-a85a-d49703b185fd"
+version = "1.13.0+0"
 """
 
 # ╔═╡ Cell order:
-# ╠═aabbccdd-0000-4000-8000-000000000001
-# ╟─aabbccdd-0000-4000-8000-000000000002
-# ╟─aabbccdd-0000-4000-8000-000000000003
-# ╟─aabbccdd-0000-4000-8000-000000000004
-# ╟─aabbccdd-0000-4000-8000-000000000005
-# ╠═aabbccdd-0000-4000-8000-000000000006
-# ╟─aabbccdd-0000-4000-8000-000000000007
-# ╟─aabbccdd-0000-4000-8000-000000000008
-# ╟─aabbccdd-0000-4000-8000-000000000009
-# ╠═aabbccdd-0000-4000-8000-000000000010
-# ╟─aabbccdd-0000-4000-8000-000000000011
-# ╟─aabbccdd-0000-4000-8000-000000000012
-# ╟─aabbccdd-0000-4000-8000-000000000013
-# ╠═aabbccdd-0000-4000-8000-000000000014
-# ╠═aabbccdd-0000-4000-8000-000000000015
-# ╟─aabbccdd-0000-4000-8000-000000000016
-# ╠═aabbccdd-0000-4000-8000-000000000017
-# ╟─aabbccdd-0000-4000-8000-000000000018
-# ╟─aabbccdd-0000-4000-8000-000000000019
-# ╠═aabbccdd-0000-4000-8000-000000000020
-# ╟─aabbccdd-0000-4000-8000-000000000021
-# ╟─aabbccdd-0000-4000-8000-000000000022
-# ╟─aabbccdd-0000-4000-8000-000000000023
-# ╠═aabbccdd-0000-4000-8000-000000000024
-# ╟─aabbccdd-0000-4000-8000-000000000025
-# ╟─aabbccdd-0000-4000-8000-000000000026
-# ╟─aabbccdd-0000-4000-8000-000000000027
-# ╟─aabbccdd-0000-4000-8000-000000000028
-# ╟─aabbccdd-0000-4000-8000-000000000029
-# ╟─aabbccdd-0000-4000-8000-000000000030
-# ╟─aabbccdd-0000-4000-8000-000000000031
-# ╟─aabbccdd-0000-4000-8000-000000000032
-# ╟─aabbccdd-0000-4000-8000-000000000033
-# ╠═aabbccdd-0000-4000-8000-000000000034
-# ╟─aabbccdd-0000-4000-8000-000000000035
-# ╟─aabbccdd-0000-4000-8000-000000000036
-# ╠═aabbccdd-0000-4000-8000-000000000037
-# ╟─aabbccdd-0000-4000-8000-000000000038
-# ╟─aabbccdd-0000-4000-8000-000000000039
-# ╟─aabbccdd-0000-4000-8000-000000000040
-# ╟─aabbccdd-0000-4000-8000-000000000041
-# ╠═aabbccdd-0000-4000-8000-000000000042
-# ╟─aabbccdd-0000-4000-8000-000000000043
-# ╟─aabbccdd-0000-4000-8000-000000000044
-# ╟─aabbccdd-0000-4000-8000-000000000045
-# ╠═aabbccdd-0000-4000-8000-000000000046
-# ╟─aabbccdd-0000-4000-8000-000000000047
-# ╠═aabbccdd-0000-4000-8000-000000000048
-# ╟─aabbccdd-0000-4000-8000-000000000049
-# ╟─aabbccdd-0000-4000-8000-000000000050
-# ╟─aabbccdd-0000-4000-8000-000000000051
-# ╟─aabbccdd-0000-4000-8000-000000000052
+# ╟─c0011a00-0001-4000-8000-000000000001
+# ╟─c0011a00-0001-4000-8000-000000000002
+# ╟─c0011a00-0001-4000-8000-000000000003
+# ╟─c0011a00-0001-4000-8000-000000000004
+# ╟─c0011a00-0001-4000-8000-000000000005
+# ╟─c0011a00-0001-4000-8000-000000000006
+# ╠═c0011a00-0001-4000-8000-000000000007
+# ╟─c0011a00-0001-4000-8000-000000000008
+# ╟─c0011a00-0001-4000-8000-000000000009
+# ╟─c0011a00-0001-4000-8000-000000000010
+# ╟─c0011a00-0001-4000-8000-000000000012
+# ╟─c0011a00-0001-4000-8000-000000000016
+# ╟─c0011a00-0001-4000-8000-000000000019
+# ╟─c0011a00-0001-4000-8000-000000000014
+# ╟─c0011a00-0001-4000-8000-000000000015
+# ╟─c0011a00-0001-4000-8000-000000000011
+# ╟─c0011a00-0001-4000-8000-000000000013
+# ╟─c0011a00-0001-4000-8000-000000000017
+# ╟─c0011a00-0001-4000-8000-000000000018
+# ╟─c0011a00-0001-4000-8000-000000000020
+# ╟─c0011a00-0001-4000-8000-000000000021
+# ╟─c0011a00-0001-4000-8000-000000000022
 # ╟─00000000-0000-0000-0000-000000000001
+# ╟─00000000-0000-0000-0000-000000000002

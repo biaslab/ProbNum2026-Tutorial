@@ -10,9 +10,17 @@ local, asynchronous, communication-light, and with a per-node uncertainty as a b
 
 ## Installation
 
-Pick whichever language you prefer — `demo.py` (Python) and `demo.jl` (Julia) cover the same
-material. Both notebooks carry their own dependency list, so there is nothing to install beyond
-the language toolchain itself.
+The notebooks complement each other:
+
+* `demo.py` (Python / marimo) develops linear solvers as distributed Gaussian inference.
+* `demo.jl` (Julia / Pluto), **Keep the die cool**, uses RxInfer to solve a chip's temperature
+  field. Adjust four periodic cooling amplitudes and phases, keep the die-average temperature
+  at or below 20°C throughout the cycle, then reduce cooling effort. The field has no heat
+  storage; all time dependence lives in the inputs. The notebook includes live plots,
+  playback, a full-cycle score, and a collapsible benchmark.
+
+Both notebooks carry their own dependency list. The previous Julia edition of the linear-solver
+tutorial is preserved in `archive/julia/linear-systems-by-message-passing.jl`.
 
 ### Python / marimo
 
@@ -53,9 +61,19 @@ julia -e 'using Pkg; Pkg.add("Pluto"); using Pluto; Pluto.run(notebook="demo.jl"
 ```
 
 A browser tab opens at `http://localhost:1234`. Pluto notebooks carry their own package
-environment, so the first open resolves and precompiles `Plots` and `PlutoUI` by itself —
+environment, so the first open resolves and precompiles `RxInfer`, `ReactiveMP`, `Plots`,
+`PlutoUI`, and `HypertextLiteral` by itself —
 **network access is required once**, and that takes a few minutes. Do this before the session,
-not during it.
+not during it. The notebook then computes five checked message-passing responses once;
+editing cooling fields or playing the animation reuses those responses.
+
+The cooling exercise adapts [RxInfer's linear-systems example](https://examples.rxinfer.com/categories/advanced_examples/solving_linear_systems_with_message_passing/).
+Its target is the spatial average at every time, with the hottest tile displayed separately.
+Cooling effort is an illustrative heat-removal measure, not calibrated electrical energy.
+
+To run the Julia model and scoring checks, use `julia scripts/check-cooling.jl`. This provisions
+the notebook's embedded dependencies in a temporary project and checks the reference schedules,
+RxInfer accuracy, and continuous-cycle scoring.
 
 ## Key references
 
