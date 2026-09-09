@@ -14,7 +14,7 @@ ProbNum 2026 tutorial — Gaussian belief propagation as a probabilistic linear 
 
 import marimo
 
-__generated_with = "0.23.15"
+__generated_with = "0.24.0"
 app = marimo.App(width="medium")
 
 
@@ -52,13 +52,7 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    **ProbNum 2026 tutorial**
-
-    Probabilistic numerics turns a computation into an inference problem. For linear solvers, a Krylov method is a Gaussian model that has seen $k$ matrix–vector products and reports a belief about $x_\ast = A^{-1}b$. It is also, at scale, expensive: the belief lives on all of $\mathbb{R}^n$, its covariance is dense, and every iteration needs global inner products.
-
-    This tutorial takes a different route to the same destination. Instead of treating $A$ as a black box we can only probe, we read its **sparsity pattern as a graphical model**. Solving $Ax = b$ then becomes *marginal inference* in a Gaussian Markov random field, and the natural algorithm is **message passing**.
-
-    Nothing is global. No inner products, no barriers, no dense covariance. The belief is *local and anytime*: after $k$ rounds every node holds a distribution built from exactly the information that has reached it.
+    # **ProbNum 2026 Tutorial**
 
     | | |
     |:--|:--|
@@ -90,38 +84,34 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 1. Problem specification
+    ## 1. Problem specification
 
     ### Why would anyone solve $Ax = b$?
 
-    Take a tiled accelerator: a few thousand compute tiles on one die, each with its own power counters, its own temperature sensor, and its own ability to throttle its clock. The chip is thermally interesting. A tile that runs hot has to slow down — but so, often, do its neighbours, because heat spreads sideways through the silicon faster than any of them can react. To decide who throttles, the control loop needs the **steady-state temperature of every tile**, and it needs it refreshed faster than the die's thermal time constant.
+    A silicon chip has a few thousand compute tiles on one die, each with its own power counters and temperature sensor. A tile that runs hot has to slow down. But so, often, do its neighbours, because heat spreads sideways through the silicon. To decide whose power to throttle, the control loop needs the **steady-state temperature of every tile**.
 
-    The physics fits in one line. Tile $i$ dissipates power $b_i$; it conducts heat to the four tiles it touches; and it loses heat to the coolant at a rate proportional to how far above ambient it sits. In steady state the three terms balance:
+    Tile $i$ dissipates power $b_i$; it conducts heat to the four tiles it touches. It loses heat to the coolant at a rate proportional to how far above ambient it sits. In steady state the three terms balance:
 
     $$
     \underbrace{c\,x_i}_{\text{lost to the coolant}} \;+\; \underbrace{\sum_{j \sim i}\,(x_i - x_j)}_{\text{conducted to neighbours}} \;=\; \underbrace{b_i}_{\text{dissipated on tile } i}.
     $$
 
-    That is one equation per tile, each involving five unknowns, and it is exactly the five-point discretisation of the screened Poisson equation $(c - \Delta)u = f$. Stack the tile temperatures into $x$ and the dissipated powers into $b$ and the control loop is asking for
+    Approximating the neighbours with a Laplacian yields $(c - \Delta)u = f$. Stack the tile temperatures into $x$ and the dissipated powers into $b$ and the steady-state temperatures are
 
     $$
     A x = b, \qquad A \in \mathbb{R}^{n\times n}\ \ \text{symmetric},\ \text{sparse},\ \text{one row per tile.}
     $$
 
-    Keep the die in mind, because three features of it are what this tutorial is really about — and they are not special to silicon. The same three hold for a power grid, a sensor network, a robot swarm and a domain-decomposed PDE; the die is just the case where they are hardest to argue with.
-
-    * **$A$ is sparse and structured — it *is* the floorplan.** Row $i$ couples $x_i$ to the handful of tiles it physically touches, and to nothing else. The graph of the matrix is the layout of the chip. (Elsewhere it is a discretised differential operator, a Gauss–Markov model, a network of sensors — same picture.)
-    * **The data is already distributed.** $b_i$ is a number tile $i$'s own counters measured, and row $i$ of $A$ is a property of tile $i$'s own package. Nothing was ever assembled anywhere. Assembling it means shipping every tile's telemetry to one place — every control period, forever.
+    * **$A$ is sparse and structured** Row $i$ couples $x_i$ to the tiles it physically touches. The graph of the matrix is the layout of the chip.
+    * **Data is distributed.** $b_i$ is a number tile $i$'s own counters measured, and row $i$ of $A$ is a property of tile $i$'s own package. Nothing was ever assembled anywhere. Assembling it means shipping every tile's telemetry to one place — every control period.
     * **Global synchronisation is the bottleneck.** With a few thousand tiles, a barrier costs more than the arithmetic between barriers, and by the time everyone has checked in, the temperature field has moved. Krylov methods need two inner products per step: that is two barriers per step.
-
-    So $n$ is large enough that the interesting quantity is not "how many flops" but **how the work is laid out across the machine** — and, since we are at a probabilistic-numerics meeting, what each tile is entitled to believe while the answer is still arriving.
 
     Our two running examples are the topologies that bracket the difficulty:
 
     * a **chain** — one row of tiles, a tridiagonal system, whose graph is a *tree*;
     * a **2-D lattice** — the whole die, a five-point stencil for $(c - \Delta)u = f$, whose graph is *loopy*.
 
-    The parameter $c \ge 0$ is the screening (reaction) term — here, the strength of the coupling to the coolant. It already has a physical meaning: it sets how far a hotspot is felt. A well-cooled die screens each hot tile into a small halo; a poorly cooled one lets hotspots talk to each other across the chip. It has a probabilistic meaning too, which we will come back to: $c$ sets the **correlation length** of the associated Gaussian field, and with it everything about how far information has to travel.
+    The parameter $c \ge 0$ is the screening (reaction) term, i.e., the strength of the coupling to the coolant. It already has a physical meaning: it sets how far a hotspot is felt. A well-cooled die screens each hot tile into a small halo; a poorly cooled one lets hotspots talk to each other across the chip. It has a probabilistic meaning too, which we will come back to. $c$ sets the **correlation length** of the associated Gaussian field, and with it everything about how far information has to travel.
     """)
     return
 
@@ -133,12 +123,19 @@ def _(np, sp):
         off = -np.ones(n - 1)
         return sp.diags([off, diag * np.ones(n), off], [-1, 0, 1], format="csr")
 
+    def lattice_matrix(rows, cols, screening=0.0):
+        "Five-point stencil for (c − Δ) on a rows×cols tiling, unknowns numbered row by row."
+        d = 4.0 + screening
+        T = sp.diags([-np.ones(cols - 1), d * np.ones(cols), -np.ones(cols - 1)],
+                     [-1, 0, 1], shape=(cols, cols))
+        band = sp.diags([-np.ones(rows - 1), -np.ones(rows - 1)], [-1, 1], shape=(rows, rows))
+        A = (sp.kron(sp.eye(rows), T) + sp.kron(band, sp.eye(cols))).tocsr()
+        A.eliminate_zeros()          # kron stores explicit zeros; nnz is reported to the reader
+        return A
+
     def grid_matrix(m, screening=0.0):
         "Five-point stencil for (c − Δ) on an m×m lattice: the graph is loopy."
-        d = 4.0 + screening
-        T = sp.diags([-np.ones(m - 1), d * np.ones(m), -np.ones(m - 1)], [-1, 0, 1])
-        band = sp.diags([-np.ones(m - 1), -np.ones(m - 1)], [-1, 1])
-        return (sp.kron(sp.eye(m), T) + sp.kron(band, sp.eye(m))).tocsr()
+        return lattice_matrix(m, m, screening)
 
     def bump_forcing(m, centers=((0.3, 0.35), (0.7, 0.65)), width=0.12):
         "Two localised sources on the m×m lattice, flattened row-major."
@@ -149,7 +146,7 @@ def _(np, sp):
             f += (1.0 if k % 2 == 0 else -0.8) * np.exp(-((X - cx) ** 2 + (Y - cy) ** 2) / (2 * width ** 2))
         return f.ravel()
 
-    return bump_forcing, chain_matrix, grid_matrix
+    return bump_forcing, chain_matrix, grid_matrix, lattice_matrix
 
 
 @app.cell
@@ -193,7 +190,86 @@ def _(PAL, base_layout, go, grid_matrix, np, sp):
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 2. Classical numerical approach
+    Pick a tiling of the die and watch what it does to $A$.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    rows_ui = mo.ui.slider(1, 12, step=1, value=4, label="tile rows", full_width=True)
+    cols_ui = mo.ui.slider(1, 12, step=1, value=6, label="tile columns", full_width=True)
+    mo.vstack([rows_ui, cols_ui])
+    return cols_ui, rows_ui
+
+
+@app.cell
+def _(PAL, cols_ui, go, hex_rgba, lattice_matrix, np, rows_ui):
+    _rows, _cols = rows_ui.value, cols_ui.value
+    _n = _rows * _cols
+    _A = lattice_matrix(_rows, _cols)
+
+    # 0 = structural zero, 1 = off-diagonal coupling, 2 = diagonal.
+    _nz = np.zeros((_n, _n))
+    _nz[np.abs(_A.toarray()) > 0] = 1.0
+    np.fill_diagonal(_nz, 2.0)
+
+    _white, _off, _diag = PAL["white"], hex_rgba(PAL["blue"], 0.55), PAL["blue"]
+    _fig = go.Figure(go.Heatmap(
+        z=_nz, zmin=-0.5, zmax=2.5, showscale=False,
+        xgap=1 if _n <= 80 else 0, ygap=1 if _n <= 80 else 0,
+        colorscale=[[0.0, _white], [1 / 3, _white], [1 / 3, _off],
+                    [2 / 3, _off], [2 / 3, _diag], [1.0, _diag]],
+        hovertemplate="A[%{y},%{x}]<extra></extra>",
+    ))
+    _fig.update_layout(
+        template="plotly_white", height=440, margin=dict(l=40, r=20, t=60, b=40),
+        title=(f"sparsity pattern of A: {_rows}×{_cols} tiling, "
+               f"n = {_n} unknowns, {_A.nnz} non-zeros "
+               f"({100 * _A.nnz / _n ** 2:.1f}% dense)"),
+    )
+    _fig.update_xaxes(title="column j", constrain="domain")
+    _fig.update_yaxes(title="row i", autorange="reversed",
+                      scaleanchor="x", scaleratio=1, constrain="domain")
+    _fig
+    return
+
+
+@app.cell
+def _(cols_ui, mo, rows_ui):
+    _rows, _cols = rows_ui.value, cols_ui.value
+    _n = _rows * _cols
+    _within = _rows * (_cols - 1)
+    _across = (_rows - 1) * _cols
+    mo.md(
+        rf"""
+    Four off-diagonal bands, and each one is a direction on the die:
+
+    | band | neighbour | edges | why it is there |
+    |:--|:--|--:|:--|
+    | $\pm 1$ | the tile beside it | {_within} | consecutive numbering follows a row of tiles |
+    | $\pm {_cols}$ | the tile above/below it | {_across} | one full row of {_cols} tiles separates them in $i$ |
+
+    The $\pm 1$ band is **torn**: entry $A_{{i,i+1}}$ is missing whenever tile $i$ ends a row, because
+    the last tile of one row does not touch the first tile of the next. Tearing accounts for
+    {_rows - 1} of the {_n - 1} slots on that band.
+
+    Slide **tile columns** and the outer bands move: the bandwidth of $A$ is the width of the tiling,
+    not the number of unknowns. That distance is the whole difficulty — the two tiles at
+    $A_{{i,i+{_cols}}}$ are physically adjacent, but a solver marching along the vector meets them
+    {_cols} steps apart. Set either slider to 1 and the two bands collapse onto each other: a single
+    row (or a single column) of tiles is the tridiagonal **chain**, whose graph is a tree. Make both
+    sliders larger than 1 and the graph carries four-cycles, which is exactly where the story of this
+    tutorial starts.
+    """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 2. Classical numerical approach
 
     **Direct solvers.** Factorise $A = LL^\top$ and substitute. Exact in exact arithmetic, and for the 2-D lattice the factor $L$ suffers fill-in: a banded matrix with $O(n)$ non-zeros produces a factor with $O(n^{3/2})$ of them. Eliminating a node connects all of its neighbours to each other, so the graph densifies as you go.
 
@@ -253,7 +329,7 @@ def _(np, sp, spla):
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 3. Probabilistic numerical approach
+    ## 3. Probabilistic numerical approach
 
     The usual probabilistic reading of a linear solver puts a Gaussian prior on $x$, treats each matrix–vector product as a linear observation $s_i^\top A x_\ast = s_i^\top b$, and conditions. It inherits a dense $n \times n$ covariance and a global policy for choosing $s_i$.
 
@@ -322,9 +398,9 @@ def _(PAL, base_layout, go, np):
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 4. The message-passing version
+    ## 4. The message-passing version
 
-    ## 4.1 The factor graph
+    ### 4.1 The factor graph
 
     Write the density as a product of one factor per node and one per edge:
 
@@ -338,7 +414,7 @@ def _(mo):
 
     The self-factor $\phi_i$ is row $i$'s own equation — it is $\mathcal{N}(x_i;\, b_i/A_{ii},\, 1/A_{ii})$, exactly the "solve my equation ignoring the coupling" belief that Jacobi starts from. The edge factor $\psi_{ij}$ is the coupling. **Every quantity in the factor graph is an entry of $A$ or $b$ that node $i$ already owns.**
 
-    ## 4.2 The messages
+    ### 4.2 The messages
 
     Sum-product on this graph: the message from $i$ to $j$ is
 
@@ -560,7 +636,7 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 4.5 What "belief" means before convergence
+    ### 4.5 What "belief" means before convergence
 
     Run the message passing for $k$ rounds and stop. What is node $i$ holding?
 
@@ -691,7 +767,7 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 4.6 Loops: exact means, over-confident variances
+    ### 4.6 Loops: exact means, over-confident variances
 
     On a graph with cycles the same information arrives at a node by several routes and gets double-counted. The remarkable fact (Weiss & Freeman 2001) is that this does **not** spoil the means: *if* GaBP converges, the marginal means are the exact solution $A^{-1}b$, cycles or no cycles. The variances are another matter — the computation tree that BP effectively solves keeps re-entering the same loop, and the walk-sum analysis of Malioutov, Johnson & Willsky (2006) shows BP counts only the self-return walks that revisit the root once. On an attractive model, where all those walks contribute with the same sign, the missing terms are positive, so BP **under-estimates** the variance: the solver is over-confident.
 
@@ -731,7 +807,7 @@ def _(PAL, base_layout, go, grid_bp, mo, np, var_grid, x_grid):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 4.7 The punchline: Jacobi is GaBP with the uncertainty deleted
+    ### 4.7 Comparison to Jacobi method
 
     Take the algorithm above and make two changes:
 
@@ -770,7 +846,7 @@ def _(A_grid, b_grid, gabp, mo, np, stationary):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 4.8 Scheduling: nobody has to wait
+    ### 4.8 Scheduling: nobody has to wait
 
     * **Synchronous** — every node sends every round, using the previous round's messages. Like Jacobi.
     * **Asynchronous** — sweep the nodes and use each message the moment it exists. Like Gauss–Seidel.
@@ -858,7 +934,7 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 4.9 Does it scale?
+    ### 4.9 Does it scale?
 
     Per round, each node sends one two-scalar message per incident edge: the cost is $O(\mathrm{nnz})$ arithmetic and $O(\mathrm{nnz})$ communication, all of it nearest-neighbour, all of it parallel. So the only question that matters is **how the round count grows with $n$** — and that is where the probabilistic reading pays off in intuition.
 
@@ -923,7 +999,7 @@ def _(mo, scale_data, scale_screens):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 4.10 When it fails
+    ### 4.10 When it fails
 
     GaBP is not unconditionally convergent, and the sufficient conditions are the familiar ones:
 
@@ -1022,7 +1098,7 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 5. Where this goes
+    ## 5. Where this goes
 
     We arrived at a linear solver that is local, asynchronous, communication-light, and reports a per-node uncertainty as a by-product — and whose classical counterpart (Jacobi) is literally itself with the second moment deleted. That combination is the argument of this tutorial: **probabilistic numerics at scale wants message passing, because message passing is what turns a global belief into a distributed one.**
 
