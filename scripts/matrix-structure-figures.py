@@ -64,46 +64,53 @@ def grid_matrix(mx, my, screening=0.0):
     return A
 
 
-# ------------------------------------------------------------------ 1. chain
-n = 9
+# --------------------------:
+#     x, y = j + 0.5, n - 0.5 - i
+#     ax.annotate("", xy=(x + 0.45, y), xytext=(n + 1.2, y + dy),
+#                 arrowprops=dict(arrowstyle="-|>", color=NAVY, lw=1.5,
+#                                 connectionstyle="arc3,rad=-0.15", shrinkA=2, shrinkB=2))
+#     ax.text(n + 1.4, y + dy, text, color=NAVY, fontsize=10.5, ha="left", va="center")
+# band_label(3, 4,  "$\\pm 1$:  the tile beside it", dy=2.4)
+# band_label(9, 14, "$\\pm m$:  t---------------------------------------- 1. chain
+n = 4
 A = chain_matrix(n)
 fig, ax = plt.subplots(figsize=(4.6, 4.6))
-draw_matrix(ax, A, GREEN, GREEN, values=True, fontsize=8.0)
-ax.set_title("chain — one row of tiles:  $A$ is $\\bf{tridiagonal}$\n"
-             f"{n} unknowns, {int((A != 0).sum())} non-zeros",
-             fontsize=12, color="#222", pad=10)
-ax.text(n/2, -0.75, "row $i$ touches $i-1$ and $i+1$ — and nothing else",
-        ha="center", va="top", fontsize=10.5, color=GRAY)
-fig.savefig("/tmp/mat/matrix-chain.png", transparent=True)
+draw_matrix(ax, A, GREEN, GREEN, values=False, fontsize=8.0)
+# ax.set_title("chain — one row of tiles:  $A$ is $\\bf{tridiagonal}$\n"
+#              f"{n} unknowns, {int((A != 0).sum())} non-zeros",
+#              fontsize=12, color="#222", pad=10)
+# ax.text(n/2, -0.75, "row $i$ touches $i-1$ and $i+1$ — and nothing else",
+#         ha="center", va="top", fontsize=10.5, color=GRAY)
+fig.savefig("../figures/matrix-chain.png", transparent=True)
 plt.close(fig)
 
 # ------------------------------------------------------------- 2. 2-D lattice
-mx, my = 5, 4
+mx, my = 4, 4
 A = grid_matrix(mx, my)
 n = mx*my
-fig, ax = plt.subplots(figsize=(6.0, 5.0))
+fig, ax = plt.subplots(figsize=(4.6, 4.6))
 draw_matrix(ax, A, BLUE, BLUE)
-ax.set_title("2-D lattice — the whole die:  $A$ is the $\\bf{five}$-$\\bf{point}$ $\\bf{stencil}$\n"
-             f"{mx}×{my} tiles, {n} unknowns, {int((A != 0).sum())} non-zeros",
-             fontsize=12, color="#222", pad=10)
+# ax.set_title("2-D lattice — the whole die:  $A$ is the $\\bf{five}$-$\\bf{point}$ $\\bf{stencil}$\n"
+            #  f"{mx}×{my} tiles, {n} unknowns, {int((A != 0).sum())} non-zeros",
+            #  fontsize=12, color="#222", pad=10)
 
 # the two bands, named — labels parked to the right of the matrix
 ax.set_xlim(-0.15, n + 10.5)
-def band_label(i, j, text, dy):
-    x, y = j + 0.5, n - 0.5 - i
-    ax.annotate("", xy=(x + 0.45, y), xytext=(n + 1.2, y + dy),
-                arrowprops=dict(arrowstyle="-|>", color=NAVY, lw=1.5,
-                                connectionstyle="arc3,rad=-0.15", shrinkA=2, shrinkB=2))
-    ax.text(n + 1.4, y + dy, text, color=NAVY, fontsize=10.5, ha="left", va="center")
-band_label(3, 4,  "$\\pm 1$:  the tile beside it", dy=2.4)
-band_label(9, 14, "$\\pm m$:  the tile above or below", dy=-2.4)
+# def band_label(i, j, text, dy):
+#     x, y = j + 0.5, n - 0.5 - i
+#     ax.annotate("", xy=(x + 0.45, y), xytext=(n + 1.2, y + dy),
+#                 arrowprops=dict(arrowstyle="-|>", color=NAVY, lw=1.5,
+#                                 connectionstyle="arc3,rad=-0.15", shrinkA=2, shrinkB=2))
+#     ax.text(n + 1.4, y + dy, text, color=NAVY, fontsize=10.5, ha="left", va="center")
+# band_label(3, 4,  "$\\pm 1$:  the tile beside it", dy=2.4)
+# band_label(9, 14, "$\\pm m$:  the tile above or below", dy=-2.4)
 
 # the tear in the first off-diagonal, where a row of the die ends
-for k in range(mx-1, n-1, mx):
-    ax.add_patch(Rectangle((k+1, n-1-k), 1, 1, facecolor="none", edgecolor=RED, lw=2.0))
-    ax.add_patch(Rectangle((k, n-1-(k+1)), 1, 1, facecolor="none", edgecolor=RED, lw=2.0))
-ax.text(n/2, -0.75, "red: where a row of tiles ends — there the neighbour is not $i\\pm1$",
-        ha="center", va="top", fontsize=10.5, color=RED)
-fig.savefig("/tmp/mat/matrix-lattice.png", transparent=True)
+# for k in range(mx-1, n-1, mx):
+#     ax.add_patch(Rectangle((k+1, n-1-k), 1, 1, facecolor="none", edgecolor=RED, lw=2.0))
+#     ax.add_patch(Rectangle((k, n-1-(k+1)), 1, 1, facecolor="none", edgecolor=RED, lw=2.0))
+# ax.text(n/2, -0.75, "red: where a row of tiles ends — there the neighbour is not $i\\pm1$",
+#         ha="center", va="top", fontsize=10.5, color=RED)
+fig.savefig("../figures/matrix-lattice.png", transparent=True)
 plt.close(fig)
 print("wrote matrix-chain.png and matrix-lattice.png")
