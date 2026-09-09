@@ -2,127 +2,60 @@
 
 Tutorial for the [2nd International Conference on Probabilistic Numerics](https://probnum2026.github.io).
 
-**Solving systems of equations with distributed probabilistic numerics** — probabilistic numerical
-methods have a scaling problem: their beliefs are global objects with dense covariances, and their
-iterations need global synchronisation. This tutorial takes the opposite route. Reading the sparsity
-pattern of a linear system as a graphical model turns solving $Ax=b$ into marginal inference in a
-Gaussian Markov random field, and the solver into **message passing between neighbouring unknowns** —
+**Probabilistic numerics at scale by distributed inference** 
+In this tutorial, we are looking at the sparsity pattern of the $A$ matrix in a system 
+of linear equations as a graphical model and turn solving $Ax=b$ into marginal inference in a
+Gaussian Markov random field, and the solver into a message passing procedure that is
 local, asynchronous, communication-light, and with a per-node uncertainty as a by-product.
-
-The punchline: the Jacobi method *is* Gaussian belief propagation with the second moment deleted
-(verified to machine precision in the notebook). The classical iterative solver is not an alternative
-to the probabilistic one; it is the probabilistic one, marginalised down to a point estimate.
-
-## Structure
-
-The session is one notebook, which exists in two editions that compute the same things and agree to
-the digits shown:
-
-| edition | file |
-|---|---|
-| Python / marimo | [`python/01-linear-systems-by-message-passing.py`](python/01-linear-systems-by-message-passing.py) |
-| Julia / Pluto | [`julia/01-linear-systems-by-message-passing.jl`](julia/01-linear-systems-by-message-passing.jl) |
-
-It runs Problem specification → classical solvers → the probabilistic-numerics view → Gaussian belief
-propagation → research outlook, and is honest that, on one laptop with a 2-D lattice, CG wins on
-iterations and the BP variances are over-confident.
-
-The notebook covers the classical solvers in two paragraphs. Three companion notebooks in
-[`extra/`](extra/) are the long version of those paragraphs, for participants who want the classical
-method in full before it reappears as message passing. They are self-contained and are not presented
-in the session.
-
-| # | Notebook | Contents |
-|---|----------|----------|
-| 1a | [`extra/01a-jacobi.py`](extra/01a-jacobi.py) | The splitting, the iteration matrix, the exact spectrum of the stencil, damped Jacobi and the smoothing factor |
-| 1b | [`extra/01b-gauss-seidel.py`](extra/01b-gauss-seidel.py) | Use-what-has-arrived, ρ_GS = ρ_J², why the ordering is a real choice, red–black parallelism, SOR and the optimal ω |
-| 1c | [`extra/01c-krylov.py`](extra/01c-krylov.py) | Krylov subspaces, CG as energy-norm optimality, the Chebyshev bound and why it is loose, eigenvalue clustering, the two all-reduces, preconditioning, BayesCG |
-
 
 ## Installation
 
+Pick whichever language you prefer — `demo.py` (Python) and `demo.jl` (Julia) cover the same
+material. Both notebooks carry their own dependency list, so there is nothing to install beyond
+the language toolchain itself.
+
 ### Python / marimo
 
-The notebooks declare their dependencies inline ([PEP 723](https://peps.python.org/pep-0723/)), so
-the least invasive route is [`uv`](https://docs.astral.sh/uv/), which builds a throwaway environment
-per notebook and installs nothing globally.
-
-**1. Install `uv`** (skip if you have it — check with `uv --version`):
+**1. Install [`uv`](https://docs.astral.sh/uv/)** (skip if `uv --version` already works):
 
 ```bash
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+curl -LsSf https://astral.sh/uv/install.sh | sh                                    # macOS / Linux
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" # Windows
 ```
 
-`brew install uv`, `pipx install uv` and `pip install uv` also work.
-
-**2. Open the notebook.** Nothing else to install — `--sandbox` reads the dependency block and
-provisions Python, marimo, NumPy, SciPy and Plotly on first run:
+**2. Open the notebook.** `--sandbox` provisions Python, marimo, NumPy, SciPy and Plotly in a
+throwaway environment, installing nothing globally:
 
 ```bash
-uvx marimo edit --sandbox python/01-linear-systems-by-message-passing.py
+uvx marimo edit --sandbox demo.py
 ```
 
 A browser tab opens at `http://localhost:2718`. The first launch downloads packages (tens of
-seconds); later launches are instant.
+seconds); later launches are instant. The same command opens the side notebooks in `extra/`.
 
-<details>
-<summary>Alternative: a conventional virtual environment (no <code>uv</code>)</summary>
-
-Requires Python ≥ 3.11:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install marimo numpy scipy plotly
-marimo edit python/01-linear-systems-by-message-passing.py
-```
-
-Conda works the same way:
-`conda create -n probnum2026 python=3.12 numpy scipy plotly && conda activate probnum2026 && pip install marimo`.
-
-</details>
+*Without `uv`:* in any Python ≥ 3.11 environment, `pip install marimo numpy scipy plotly` and then
+`marimo edit demo.py`.
 
 ### Julia / Pluto
 
 **1. Install Julia** via [`juliaup`](https://github.com/JuliaLang/juliaup) (skip if `julia --version`
-already reports ≥ 1.10):
+reports ≥ 1.10):
 
 ```bash
-# macOS / Linux
-curl -fsSL https://install.julialang.org | sh
-
-# Windows
-winget install julia -s msstore
+curl -fsSL https://install.julialang.org | sh  # macOS / Linux
+winget install julia -s msstore                # Windows
 ```
 
-**2. Install Pluto**, once, into your default Julia environment:
+**2. Open the notebook.** This installs Pluto once, then starts it on `demo.jl`:
 
 ```bash
-julia -e 'using Pkg; Pkg.add("Pluto")'
+julia -e 'using Pkg; Pkg.add("Pluto"); using Pluto; Pluto.run(notebook="demo.jl")'
 ```
 
-**3. Start Pluto and open the notebook:**
-
-```bash
-julia -e 'using Pluto; Pluto.run()'
-```
-
-A browser tab opens at `http://localhost:1234`. Paste the path to
-`julia/01-linear-systems-by-message-passing.jl` into the *Open a notebook* box on the start page.
-
-Pluto notebooks carry their own package environment, so the first open resolves and precompiles
-`Plots` and `PlutoUI` by itself — **network access is required once**, and that first load takes a
-few minutes, essentially all of it Plots precompilation. Do this before the session, not during it.
-
-### Verifying the install before the session
-
-Both editions run end-to-end in about ten seconds once packages are in place. A good check is to open
-the notebook, run all cells, and confirm the last section renders its plots — if the interactive
-sliders in §4 respond, everything is wired up correctly.
+A browser tab opens at `http://localhost:1234`. Pluto notebooks carry their own package
+environment, so the first open resolves and precompiles `Plots` and `PlutoUI` by itself —
+**network access is required once**, and that takes a few minutes. Do this before the session,
+not during it.
 
 ## Key references
 
