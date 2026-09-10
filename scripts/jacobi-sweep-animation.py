@@ -252,17 +252,17 @@ def animate(sim, args):
                                lw=2.4, label="the four tiles it reads"),
                      Rectangle((0, 0), 1, 1, facecolor="none", edgecolor=PAL["red"],
                                lw=1.8, ls=(0, (2.5, 1.5)),
-                               label="its own value — never read")],
+                               label="its own value (never read)")],
             loc="upper center", bbox_to_anchor=(0.5, -0.015), frameon=False,
             fontsize=9.5, handlelength=1.4, borderpad=0.2, labelspacing=0.35)
 
     im_write = die_panel(ax_write, m, write0, sim["vmax"], cmap)
-    ax_write.set_title(r"write:  $x^{(t+1)}$, tile by tile" if not args.gauss_seidel
+    ax_write.set_title(r"write:  $x^{(t+1)}$" if not args.gauss_seidel
                        else r"write:  this sweep's values", fontsize=11.5, color="#222")
     tgt_rect = Rectangle((0, 0), 1, 1, facecolor="none", edgecolor=PAL["red"],
                          lw=2.8, visible=False)
     ax_write.add_patch(tgt_rect)
-    ax_write.set_xlabel("red: the tile being written\ngrey: not computed yet, this sweep",
+    ax_write.set_xlabel("red: the tile being written\ngrey: not computed yet",
                         fontsize=9.5, color="#555", labelpad=8)
     cb = fig.colorbar(im_write, ax=ax_write, fraction=0.046, pad=0.03)
     cb.set_label("temperature above ambient", fontsize=9)
@@ -270,11 +270,11 @@ def animate(sim, args):
 
     if show_mat:
         matrix_panel(ax_mat, A, m)
-        ax_mat.set_title(r"row $i$ of $A$:  five non-zeros, two bands",
+        ax_mat.set_title(r"row $i$ of $A$",
                          fontsize=11.5, color="#222")
-        ax_mat.set_xlabel("the $\\pm m$ band is the tile above and below —\n"
-                          "on the tiling $A$ is not tridiagonal",
-                          fontsize=9.5, color=PAL["gray"], labelpad=8)
+        # ax_mat.set_xlabel("the $\\pm m$ band is the tile above and below —\n"
+                        #   "on the tiling $A$ is not tridiagonal",
+                        #   fontsize=9.5, color=PAL["gray"], labelpad=8)
         band = Rectangle((-0.5, 0), n, 1, facecolor=PAL["orange"], alpha=0.28,
                          edgecolor="none", visible=False)
         ax_mat.add_patch(band)
@@ -289,10 +289,10 @@ def animate(sim, args):
             ax_mat.add_patch(r)
 
     head = fig.text(0.5, 0.975, "", ha="center", va="top", fontsize=12.5, color="#222")
-    calc = fig.text(0.5, 0.04, "", ha="center", va="center", fontsize=12.0,
-                    color="#222", family="DejaVu Sans")
+    # calc = fig.text(0.5, 0.04, "", ha="center", va="center", fontsize=12.0,
+    #                 color="#222", family="DejaVu Sans")
 
-    fig.tight_layout(rect=(0.0, 0.09, 1.0, 0.935))
+    fig.tight_layout(rect=(0.0, 0.03, 1.0, 0.935))
 
     def draw(fi):
         f = frames[fi]
@@ -323,12 +323,12 @@ def animate(sim, args):
             head.set_text(f"{method} sweep {args.warmup + f['sweep'] + 1}"
                           f"   —   component {f['step'] + 1} of {n}:  tile $({i},{j})$,"
                           f" row $i = {k}$")
-            edge = "" if len(f["nb"]) == 4 else \
-                f"      (edge tile: {len(f['nb'])} neighbours, the rest is coolant)"
-            calc.set_text(
-                f"$x_{{{i},{j}}} \\leftarrow (b_i + \\sum_{{j \\sim i}} x_j)\\,/\\,(4+c)$"
-                f"  $= ({f['bi']:.3f} + {f['nbsum']:.3f})\\,/\\,{f['diag']:.2f}"
-                f" = {f['val']:.4f}$" + edge)
+            # edge = "" if len(f["nb"]) == 4 else \
+            #     f"      (edge tile: {len(f['nb'])} neighbours, the rest is coolant)"
+            # calc.set_text(
+            #     f"$x_{{{i},{j}}} \\leftarrow (b_i + \\sum_{{j \\sim i}} x_j)\\,/\\,(4+c)$"
+            #     f"  $= ({f['bi']:.3f} + {f['nbsum']:.3f})\\,/\\,{f['diag']:.2f}"
+            #     f" = {f['val']:.4f}$" + edge)
         else:
             tgt_rect.set_visible(False)
             if show_read:
@@ -344,11 +344,11 @@ def animate(sim, args):
                           if not args.gauss_seidel else
                           f"{method} sweep {args.warmup + f['sweep'] + 1} complete"
                           f"   —   all {n} components updated, each from the latest values")
-            calc.set_text(f"$\\Vert b - Ax^{{(t+1)}}\\Vert/\\Vert b\\Vert = {f['res']:.3e}$"
-                          f"      (visiting order: {args.order}"
-                          + ("" if args.gauss_seidel else
-                             " — for Jacobi the order cannot change this number)")
-                          + (")" if args.gauss_seidel else ""))
+            # calc.set_text(f"$\\Vert b - Ax^{{(t+1)}}\\Vert/\\Vert b\\Vert = {f['res']:.3e}$"
+            #               f"      (visiting order: {args.order}"
+            #               + ("" if args.gauss_seidel else
+            #                  " — for Jacobi the order cannot change this number)")
+            #               + (")" if args.gauss_seidel else ""))
         return ()
 
     anim = FuncAnimation(fig, draw, frames=len(frames),
