@@ -18,8 +18,12 @@ The notebooks complement each other:
   at or below 20°C throughout the cycle, then reduce cooling effort. The field has no heat
   storage; all time dependence lives in the inputs. The notebook includes live plots,
   playback, a full-cycle score, and a collapsible benchmark.
+* `deeper_tutorial.jl` (Julia / Pluto) reproduces RxInfer's **Solving Linear Systems with
+  Message Passing** example end to end: chains and loops, a heat grid, a state-space prior
+  with missing observations, and the composed model with its animation. Numerical claims
+  are checked against an exact reduced Gaussian reference.
 
-Both notebooks carry their own dependency list. The previous Julia edition of the linear-solver
+The notebooks carry their own dependency lists. The previous Julia edition of the linear-solver
 tutorial is preserved in `archive/julia/linear-systems-by-message-passing.jl`.
 
 ### Python / marimo
@@ -74,6 +78,21 @@ Cooling effort is an illustrative heat-removal measure, not calibrated electrica
 To run the Julia model and scoring checks, use `julia scripts/check-cooling.jl`. This provisions
 the notebook's embedded dependencies in a temporary project and checks the reference schedules,
 RxInfer accuracy, and continuous-cycle scoring.
+
+Open the complete RxInfer tutorial with:
+
+```bash
+julia -e 'using Pluto; Pluto.run(notebook="deeper_tutorial.jl")'
+```
+
+This notebook includes a pinned environment, the upstream source revision and its MIT notice.
+The final model has 120 time slices and 48,480 Gaussian coordinates; inference and the
+132-frame animation can take several minutes on the first run. The text distinguishes
+convergence error from error against simulated truth and explains the original model's
+uncancelled normaliser bias.
+
+Use Julia 1.11 or later for `deeper_tutorial.jl` (validated on 1.11.9). Run its complete
+numerical and animation checks with `julia scripts/check-deeper-tutorial.jl`.
 
 ## Key references
 
