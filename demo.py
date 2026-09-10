@@ -56,10 +56,10 @@ def _(mo):
 
     | | |
     |:--|:--|
-    | **1. Problem specification** | large sparse systems, and why "large" forces "distributed" |
-    | **2. Classical numerical approach** | direct factorisation, Jacobi/Gauss–Seidel, conjugate gradients |
+    | **1. Problem specification** | large sparse structured systems |
+    | **2. Classical numerical approach** | Jacobi/Gauss–Seidel, conjugate gradients |
     | **3. Probabilistic numerical approach** | $Ax=b$ as the mean of $\mathcal{N}(A^{-1}b,\, A^{-1})$ |
-    | **4. Message-passing version** | Gaussian belief propagation, and what it brings  |
+    | **4. Message-passing version** | Gaussian belief propagation, and scaling  |
     """)
     return
 
@@ -70,10 +70,18 @@ def _(mo):
         mo.md(
             r"""
     **References**
-    - Shental, Bickson, Siegel, Wolf & Dolev, *Gaussian belief propagation solver for systems of linear equations*, International Symposium on Information Theory, 2008; extended version [arXiv:0810.1119](https://arxiv.org/abs/0810.1119).
-    - Bickson, Tock, Shental & Dolev, *Polynomial linear programming with Gaussian belief propagation*, Allerton Conference on Communication, Control, and Computing, 2008.
-    - Fanaskov, *Gaussian belief propagation solvers for nonsymmetric systems of linear equations*, SIAM Journal on Scientific Computing,  2022.
-    - Cockayne, Oates, Ipsen, & Girolami, *A Bayesian Conjugate-Gradient Method*, Bayesian Analysis, 2009.
+    * Shental, O., Bickson, D., Siegel, P. H., Wolf, J. K., & Dolev, D. (2008). *Gaussian belief propagation solver for systems of linear equations*. IEEE ISIT, 1863–1867. Extended: [arXiv:0810.1119](https://arxiv.org/abs/0810.1119).
+    * Bickson, D., Tock, Y., Shental, O., & Dolev, D. (2008). *Polynomial linear programming with Gaussian belief propagation*. Allerton, 895–901.
+    * Fanaskov, V. (2022). *Gaussian belief propagation solvers for nonsymmetric systems of linear equations*. SIAM J. Sci. Comput., 44(2), A77–A102.
+    * Weiss, Y., & Freeman, W. T. (2001). *Correctness of belief propagation in Gaussian graphical models of arbitrary topology*. Neural Computation, 13(10), 2173–2200.
+    * Malioutov, D. M., Johnson, J. K., & Willsky, A. S. (2006). *Walk-sums and belief propagation in Gaussian graphical models*. JMLR, 7, 2031–2064.
+    * Heskes, T. (2002). *Stable fixed points of loopy belief propagation are local minima of the Bethe free energy*. NeurIPS 15. [proceedings](https://papers.nips.cc/paper/2220-stable-fixed-points-of-loopy-belief-propagation-are-local-minima-of-the-bethe-free-energy).
+    * Ihler, A. T., Fisher III, J. W., & Willsky, A. S. (2005). *Loopy belief propagation: convergence and effects of message errors*. JMLR, 6, 905–936. [jmlr.org](https://jmlr.org/papers/v6/ihler05a.html).
+    * Johnson, J. K., Bickson, D., & Dolev, D. (2009). *Fixing convergence of Gaussian belief propagation*. IEEE ISIT, 1674–1678. [arXiv:0901.4192](https://arxiv.org/abs/0901.4192).
+    * Ruozzi, N., & Tatikonda, S. (2013). *Message-passing algorithms for quadratic minimization*. JMLR, 14, 2287–2314. [jmlr.org](https://jmlr.org/papers/v14/ruozzi13a.html).
+    * Hennig, P., Osborne, M. A., & Kersting, H. P. (2022). *Probabilistic Numerics: Computation as Machine Learning*. Cambridge University Press.
+    * Cockayne, J., Oates, C. J., Ipsen, I. C. F., & Girolami, M. (2019). *A Bayesian conjugate gradient method*. Bayesian Analysis, 14(3), 937–1012.
+    * Ortiz, J., Pupilli, M., Leutenegger, S., & Davison, A. J. (2020). *Bundle adjustment on a graph processor*. CVPR, 2413–2422. [arXiv:2003.03134](https://arxiv.org/abs/2003.03134).
     """
         ),
         kind="info",
@@ -86,9 +94,7 @@ def _(mo):
     mo.md(r"""
     ## 1. Problem specification
 
-    ### Why would anyone solve $Ax = b$?
-
-    A silicon chip has a few thousand compute tiles on one die, each with its own power counters and temperature sensor. A tile that runs hot has to slow down. But so, often, do its neighbours, because heat spreads sideways through the silicon. To decide whose power to throttle, the control loop needs the **steady-state temperature of every tile**.
+    A silicon chip has a few thousand compute tiles on one die, each with its own power counters and temperature sensor. A tile that runs hot has to slow down. But so, often, do its neighbours, because heat spreads sideways through the silicon. To decide whose power to throttle, the control loop needs the steady-state temperature of every tile.
 
     Tile $i$ dissipates power $b_i$; it conducts heat to the four tiles it touches. It loses heat to the coolant at a rate proportional to how far above ambient it sits. In steady state the three terms balance:
 
@@ -104,14 +110,9 @@ def _(mo):
 
     * **$A$ is sparse and structured** Row $i$ couples $x_i$ to the tiles it physically touches. The graph of the matrix is the layout of the chip.
     * **Data is distributed.** $b_i$ is a number tile $i$'s own counters measured, and row $i$ of $A$ is a property of tile $i$'s own package. Nothing was ever assembled anywhere. Assembling it means shipping every tile's telemetry to one place — every control period.
-    * **Global synchronisation is the bottleneck.** With a few thousand tiles, a barrier costs more than the arithmetic between barriers, and by the time everyone has checked in, the temperature field has moved. Krylov methods need two inner products per step: that is two barriers per step.
+    * **Global synchronisation is the bottleneck.** With a few thousand tiles, a barrier costs more than the arithmetic between barriers, and by the time everyone has checked in, the temperature field has moved.
 
-    Our two running examples are the topologies that bracket the difficulty:
-
-    * a **chain** — one row of tiles, a tridiagonal system, whose graph is a *tree*;
-    * a **2-D lattice** — the whole die, a five-point stencil for $(c - \Delta)u = f$, whose graph is *loopy*.
-
-    The parameter $c \ge 0$ is the screening (reaction) term, i.e., the strength of the coupling to the coolant. It already has a physical meaning: it sets how far a hotspot is felt. A well-cooled die screens each hot tile into a small halo; a poorly cooled one lets hotspots talk to each other across the chip. It has a probabilistic meaning too, which we will come back to. $c$ sets the **correlation length** of the associated Gaussian field, and with it everything about how far information has to travel.
+    The parameter $c \ge 0$ is the screening (reaction) term, i.e., the strength of the coupling to the coolant. Its physical meaning is that it sets how far a hotspot is felt. A well-cooled die will have small hotspots, a poorly cooled one will have hotspots that transfer heat far. It has a probabilistic meaning too, which we will come back to. $c$ affects the **correlation length** of the associated Gaussian field, and indicates how far information has to travel.
     """)
     return
 
@@ -154,36 +155,6 @@ def _(mo):
     mo.md(r"""
     The picture to keep in mind for the rest of the tutorial: **the matrix *is* a graph**. Node $i$ is the unknown $x_i$; there is an edge $\{i,j\}$ whenever $A_{ij} \neq 0$. Everything the solver will do is expressible as nodes talking along those edges.
     """)
-    return
-
-
-@app.cell
-def _(PAL, base_layout, go, grid_matrix, np, sp):
-    _m = 6
-    _A = grid_matrix(_m)
-    _Ao = sp.coo_matrix(_A - sp.diags(_A.diagonal()))
-    _xy = np.array([[i // _m, i % _m] for i in range(_m * _m)], dtype=float)
-
-    _ex, _ey = [], []
-    for _i, _j in zip(_Ao.row, _Ao.col):
-        if _i < _j:
-            _ex += [_xy[_i, 1], _xy[_j, 1], None]
-            _ey += [_xy[_i, 0], _xy[_j, 0], None]
-
-    _fig = go.Figure()
-    _fig.add_trace(go.Scatter(x=_ex, y=_ey, mode="lines", name="edges  (Aᵢⱼ ≠ 0)",
-                              line=dict(color=PAL["gray"], width=1.5), hoverinfo="skip"))
-    _fig.add_trace(go.Scatter(x=_xy[:, 1], y=_xy[:, 0], mode="markers+text",
-                              text=[str(_k) for _k in range(_m * _m)], textposition="middle center",
-                              textfont=dict(size=8, color=PAL["white"]),
-                              marker=dict(color=PAL["blue"], size=20, line=dict(color=PAL["white"], width=1.5)),
-                              name="unknowns  xᵢ"))
-    base_layout(_fig, title=f"The graph of A: {_m}×{_m} lattice, {_A.nnz} non-zeros",
-                legend=dict(x=0.01, y=1.12, orientation="h"))
-    _fig.update_xaxes(visible=False)
-    _fig.update_yaxes(visible=False, scaleanchor="x", scaleratio=1, autorange="reversed")
-    _fig.update_layout(height=420)
-    _fig
     return
 
 
@@ -254,13 +225,9 @@ def _(cols_ui, mo, rows_ui):
     the last tile of one row does not touch the first tile of the next. Tearing accounts for
     {_rows - 1} of the {_n - 1} slots on that band.
 
-    Slide **tile columns** and the outer bands move: the bandwidth of $A$ is the width of the tiling,
-    not the number of unknowns. That distance is the whole difficulty — the two tiles at
+    If you change the number of **tile columns**, then the outer bands change. Two tiles at
     $A_{{i,i+{_cols}}}$ are physically adjacent, but a solver marching along the vector meets them
-    {_cols} steps apart. Set either slider to 1 and the two bands collapse onto each other: a single
-    row (or a single column) of tiles is the tridiagonal **chain**, whose graph is a tree. Make both
-    sliders larger than 1 and the graph carries four-cycles, which is exactly where the story of this
-    tutorial starts.
+    {_cols} steps apart. If you set either slider to 1, the two bands collapse onto each other and the matrix becomes tridiagonal. This corresponds to a chain. 
     """
     )
     return
@@ -269,21 +236,27 @@ def _(cols_ui, mo, rows_ui):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 2. Classical numerical approach
+    ## 2. Classical numerical approaches
 
-    **Direct solvers.** Factorise $A = LL^\top$ and substitute. Exact in exact arithmetic, and for the 2-D lattice the factor $L$ suffers fill-in: a banded matrix with $O(n)$ non-zeros produces a factor with $O(n^{3/2})$ of them. Eliminating a node connects all of its neighbours to each other, so the graph densifies as you go.
+    Three standard ways to solve $Ax = b$ without ever forming $A^{-1}$. All of them are iterative, and all of them touch $A$ only through matrix–vector products, so all of them exploit the sparsity we just looked at.
 
-    **Stationary iterative methods.** Split $A = D + R$ and iterate
+    **Jacobi.** Split $A = D + R$ into its diagonal and the off-diagonal remainder, and turn the fixed-point equation into a fixed-point iteration
 
     $$
-    x^{(t+1)} = D^{-1}\bigl(b - R\,x^{(t)}\bigr) \qquad \text{(Jacobi)},
+    x^{(t+1)} = D^{-1}\bigl(b - R\,x^{(t)}\bigr),
     $$
 
-    i.e. *each unknown solves its own equation, assuming its neighbours are right*. This is already local and distributed, as node $i$ only needs $x_j$ for its neighbours. Gauss–Seidel is the same update with values used as soon as they are available (asynchronous rather than synchronous). Both are simple and both converge slowly, at a rate set by the spectral radius of the iteration matrix.
+    i.e. *each unknown solves its own equation, assuming its neighbours are right*. This is already local and distributed: tile $i$ needs nothing but the current $x_j$ of the tiles it touches. It converges for every $x^{(0)}$ exactly when the spectral radius of $D^{-1}R$ is below 1, and that spectral radius is also the rate — for a lattice it sits just under 1, so the convergence is slow.
 
-    **Krylov methods.** Conjugate gradients minimises the $A$-norm error over the Krylov space and converges in $O(\sqrt{\kappa}\,\log \varepsilon^{-1})$ iterations, which is far better. The price is that every step needs $r^\top r$ and $p^\top Ap$, two inner products over all $n$ entries. On a distributed machine every processor must wait for every other.
+    **Gauss–Seidel.** The same update, with each new value used the moment it exists. Split $A = L + U$ into the lower triangle (diagonal included) and the strict upper triangle and iterate $x^{(t+1)} = L^{-1}\bigl(b - U x^{(t)}\bigr)$. Sweeping in place rather than holding the whole previous iterate roughly squares the Jacobi error per sweep, and costs a sweep order: the update is asynchronous, and the iterates depend on how the tiles are numbered.
 
-    All three return a vector $x_k$ plus an error bound in terms of quantities ($\kappa$, $\|x_\ast\|$) that are exactly as unknown as the solution.
+    **Conjugate gradients.** For symmetric positive definite $A$, solving $Ax = b$ is minimising
+
+    $$
+    q(x) = \tfrac12 x^\top A x - b^\top x ,
+    $$
+
+    whose gradient is the negative residual $Ax - b$. CG descends along directions that are $A$-conjugate, $p_i^\top A p_j = 0$ for $i \neq j$, so the $A$-norm error is minimised over the whole Krylov space spanned so far. The price is the step size and the conjugacy correction: every iteration needs $r^\top r$ and $p^\top A p$, two inner products over all $n$ entries. Each one is a global barrier — on a distributed machine every processor waits for every other, twice per iteration.
     """)
     return
 
@@ -329,6 +302,149 @@ def _(np, sp, spla):
 @app.cell
 def _(mo):
     mo.md(r"""
+    Consider a $24 \times 24$ tiling of the die ($n = 576$ unknowns), the five-point stencil of §1 with a small screening term $c$, and two localised heat sources. Drag the slider and watch the three iterations fill the die in.
+    """)
+    return
+
+
+@app.cell
+def _(bump_forcing, grid_matrix, spla):
+    m_grid = 24                       # 24 × 24 tiling of the die, n = 576 unknowns
+    screen_grid = 0.4
+    A_grid = grid_matrix(m_grid, screening=screen_grid)
+    b_grid = bump_forcing(m_grid)
+    x_grid = spla.spsolve(A_grid.tocsc(), b_grid)     # reference solution, for the error panels
+    return A_grid, b_grid, m_grid, x_grid
+
+
+@app.cell
+def _(A_grid, b_grid, conjugate_gradients, np, stationary):
+    K_cls = 60
+    cls_names = ["Jacobi", "Gauss–Seidel", "conjugate gradients"]
+    cls_iterates = {
+        "Jacobi": stationary(A_grid, b_grid, K_cls, "jacobi"),
+        "Gauss–Seidel": stationary(A_grid, b_grid, K_cls, "gs"),
+        "conjugate gradients": conjugate_gradients(A_grid, b_grid, K_cls),
+    }
+    _bn = np.linalg.norm(b_grid)
+    cls_res = {k: [np.linalg.norm(A_grid @ x - b_grid) / _bn for x in xs]
+               for k, xs in cls_iterates.items()}
+    return K_cls, cls_iterates, cls_names, cls_res
+
+
+@app.cell
+def _(K_cls, mo):
+    iter_slider = mo.ui.slider(0, K_cls, step=1, value=5, label="iterations t", full_width=True)
+    field_pick = mo.ui.radio(options=["iterate x⁽ᵗ⁾", "error x⁽ᵗ⁾ − x⋆"],
+                             value="iterate x⁽ᵗ⁾", label="show", inline=True)
+    mo.vstack([iter_slider, field_pick])
+    return field_pick, iter_slider
+
+
+@app.cell
+def _(
+    cls_iterates,
+    cls_names,
+    cls_res,
+    field_pick,
+    go,
+    iter_slider,
+    m_grid,
+    np,
+    x_grid,
+):
+    _t = iter_slider.value
+    _show_err = field_pick.value.startswith("error")
+    _lim = float(np.abs(x_grid).max())                # one scale for every panel and every t
+    _domains = [(0.00, 0.27), (0.33, 0.60), (0.66, 0.93)]   # right edge left free for the colorbar
+
+    _fig = go.Figure()
+    for _i, _name in enumerate(cls_names):
+        _x = cls_iterates[_name][_t]
+        _z = (_x - x_grid if _show_err else _x).reshape(m_grid, m_grid)
+        _ax = "" if _i == 0 else str(_i + 1)
+        _fig.add_trace(go.Heatmap(
+            z=_z, coloraxis="coloraxis", xaxis=f"x{_ax}", yaxis=f"y{_ax}",
+            hovertemplate=f"{_name}<br>%{{z:.3f}}<extra></extra>",
+        ))
+        _fig.add_annotation(
+            x=sum(_domains[_i]) / 2, y=1.06, xref="paper", yref="paper",
+            showarrow=False, xanchor="center",
+            text=f"<b>{_name}</b><br>‖Ax−b‖/‖b‖ = {cls_res[_name][_t]:.2e}",
+        )
+
+    _fig.update_layout(
+        template="plotly_white", height=340, margin=dict(l=20, r=20, t=80, b=20),
+        title=("after t = {} iterations: {}".format(
+            _t, "error x⁽ᵗ⁾ − x⋆" if _show_err else "iterate x⁽ᵗ⁾")),
+        coloraxis=dict(colorscale="RdBu", cmin=-_lim, cmax=_lim,
+                       colorbar=dict(x=1.0, len=0.85, thickness=14)),
+        **{f"xaxis{'' if _j == 0 else _j + 1}": dict(domain=_domains[_j], visible=False)
+           for _j in range(3)},
+        **{f"yaxis{'' if _j == 0 else _j + 1}": dict(
+            visible=False, anchor=f"x{'' if _j == 0 else _j + 1}",
+            scaleanchor=f"x{'' if _j == 0 else _j + 1}", scaleratio=1, autorange="reversed")
+           for _j in range(3)},
+    )
+    _fig
+    return
+
+
+@app.cell
+def _(K_cls, PAL, base_layout, cls_names, cls_res, go, iter_slider, np):
+    _colors = [PAL["blue"], PAL["orange"], PAL["green"]]
+    _fig = go.Figure()
+    for _name, _c in zip(cls_names, _colors):
+        _fig.add_trace(go.Scatter(y=np.maximum(cls_res[_name], 1e-16), x=np.arange(K_cls + 1),
+                                  mode="lines", name=_name, line=dict(color=_c, width=2)))
+    _fig.add_vline(x=iter_slider.value, line_dash="dot", line_color=PAL["gray"])
+    base_layout(_fig, title="relative residual per iteration", xlabel="iteration t",
+                ylabel="‖Ax⁽ᵗ⁾ − b‖ / ‖b‖", height=320,
+                legend=dict(orientation="h", y=-0.25))
+    _fig.update_yaxes(type="log")
+    _fig
+    return
+
+
+@app.cell
+def _(cls_iterates, cls_names, cls_res, iter_slider, mo, np, x_grid):
+    _t = iter_slider.value
+    _rows = "\n".join(
+        "| {} | {:.2e} | {:.2e} | {} |".format(
+            _name, cls_res[_name][_t], np.max(np.abs(cls_iterates[_name][_t] - x_grid)), _cost)
+        for _name, _cost in zip(cls_names, ["1 matvec, none", "1 sweep, none (but ordered)",
+                                            "1 matvec, **two**"])
+    )
+    mo.md(
+        f"""
+    | after t = {_t} iterations | rel. residual | max error | per iteration: work, global barriers |
+    |:--|--:|--:|:--|
+    {_rows}
+    """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.callout(
+        mo.md(
+            r"""
+    **What to look for.** At $t = 1$ the iterate is barely more than the two source bumps — Jacobi's is
+    exactly $b_i/A_{ii}$ tile by tile, and CG's is $b$ rescaled by one step size. Jacobi then spreads
+    that information one tile per iteration — the front you see creeping outward is literally the graph
+    distance covered so far. Gauss–Seidel spreads it faster in the sweep direction. Conjugate gradients is not local at all: after a handful of iterations its iterate already has global structure, because each step mixes information across
+    the whole die through the two inner products.
+    """
+        ),
+        kind="info",
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ## 3. Probabilistic numerical approach
 
     The usual probabilistic reading of a linear solver puts a Gaussian prior on $x$, treats each matrix–vector product as a linear observation $s_i^\top A x_\ast = s_i^\top b$, and conditions. It inherits a dense $n \times n$ covariance and a global policy for choosing $s_i$.
@@ -346,7 +462,7 @@ def _(mo):
     \boxed{\;p(x) \;=\; \mathcal{N}\bigl(x;\ A^{-1}b,\ A^{-1}\bigr).\;}
     $$
 
-    So the solution vector *is* the mean of a Gaussian whose **precision matrix is $A$ itself** (Shental et al. 2008, Prop. 8). Solving a linear system and computing the marginal means of a Gaussian Markov random field are the same problem:
+    So the solution vector *is* the mean of a Gaussian whose precision matrix is $A$ itself (Shental et al. 2008, Prop. 8). Solving a linear system and computing the marginal means of a Gaussian Markov random field are the same problem:
 
     | linear algebra | probabilistic inference |
     |:--|:--|
@@ -361,7 +477,7 @@ def _(mo):
 
     1. **The uncertainty is free-standing.** We did not choose a prior and we are not modelling rounding error. The Gaussian is a re-encoding of the problem itself, and its marginal variances $(A^{-1})_{ii}$ are the quantity a statistician would want anyway when $A$ is a posterior precision (Gaussian process regression, GMRF models, Kalman smoothing, bundle adjustment).
 
-       Back on the die, that quantity is not a statistical abstraction either: $(A^{-1})_{ij}$ is the temperature rise at tile $i$ per unit of power dissipated at tile $j$ — the **thermal impedance** of the chip, which is what a thermal engineer would have measured. Its diagonal, the marginal variance, is how hot tile $i$ gets from its own watt *once the rest of the die has been allowed to warm up in response*. The conditional variance $1/A_{ii}$ is the same number computed with every neighbour pinned to ambient: the answer a tile would give if it believed it were the only warm thing on the chip. The gap between those two is real, physical, and — as §4 will show — is precisely what the messages carry.
+       Back on the die, that quantity is not a statistical abstraction either: $(A^{-1})_{ij}$ is the temperature rise at tile $i$ per unit of power dissipated at tile $j$ — the thermal impedance of the chip, which is what a thermal engineer would have measured. Its diagonal, the marginal variance, is how hot tile $i$ gets from its own watt *once the rest of the die has been allowed to warm up in response*. The conditional variance $1/A_{ii}$ is the same number computed with every neighbour pinned to ambient: the answer a tile would give if it believed it were the only warm thing on the chip. The gap between those two is real, physical, and — as §4 will show — is precisely what the messages carry.
     2. **Locality is now structural.** $A_{ij} = 0$ means $x_i \perp x_j \mid x_{\text{rest}}$. The graph of the matrix is the conditional independence graph of the belief, so an inference algorithm that only exchanges information along edges is *automatically* a solver that only communicates along the sparsity pattern.
 
     The last row of the table is the seed of the entire algorithm. A node that knows only its own equation knows the conditional variance $1/A_{ii}$; to upgrade it to the marginal variance $(A^{-1})_{ii}$ it has to hear from the rest of the graph.
@@ -392,6 +508,247 @@ def _(PAL, base_layout, go, np):
     _fig.update_yaxes(scaleanchor="x", scaleratio=1)
     _fig.update_layout(height=430)
     _fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### BayesCG: conditioning on matrix–vector products
+
+    The Gaussian above is the answer, but it can also serve as the **prior**. Take $p_0(x) = \mathcal{N}(0,\, A^{-1})$ — the belief of somebody who knows $A$ but has not yet looked at $b$ — and let the solver observe the right-hand side a few directions at a time. Picking a search direction $s_i$ and computing the matrix–vector product returns $s_i^\top A x_\ast = s_i^\top b$, a noiseless linear observation of $x_\ast$, so after $m$ of them the posterior is Gaussian again,
+
+    $$
+    \mu_m = \Sigma_0 A^\top S_m \bigl(S_m^\top A \Sigma_0 A^\top S_m\bigr)^{-1} S_m^\top b,
+    \qquad
+    \Sigma_m = \Sigma_0 - \Sigma_0 A^\top S_m \bigl(S_m^\top A \Sigma_0 A^\top S_m\bigr)^{-1} S_m^\top A \Sigma_0,
+    $$
+
+    with $S_m = [\,s_1 \cdots s_m\,]$. That is **BayesCG** (Cockayne et al. 2019). Taking $\Sigma_0 = A^{-1}$ — the distribution we just derived — collapses it: write the directions $A$-orthonormal, $\hat{s}_i^\top A \hat{s}_j = \delta_{ij}$, and
+
+    $$
+    \mu_m = \sum_{i \le m} \hat{s}_i\,(\hat{s}_i^\top b),
+    \qquad
+    \Sigma_m = A^{-1} - \sum_{i \le m} \hat{s}_i \hat{s}_i^\top .
+    $$
+
+    Every direction resolves exactly one dimension of the belief and leaves the other $n - m$ untouched. Take the directions to be the residuals $b - A\mu_{i-1}$ and the posterior mean *is* the conjugate-gradients iterate of §2; take them any other way and the same bookkeeping gives a slower solver.
+
+    A smaller die here — a $10 \times 10$ tiling, $n = 100$ — so that the budget of $n$ directions can actually be exhausted.
+    """)
+    return
+
+
+@app.cell
+def _(np):
+    def bayescg(A, prior_var, b, iters, directions="residual", seed=0):
+        """BayesCG with prior 𝒩(0, A⁻¹), directions A-orthonormalised as they arrive.
+
+        directions : 'residual'   — s = b − Aμ, which reproduces conjugate gradients
+                     'coordinate' — s = e₁, e₂, … , one tile at a time
+                     'random'     — s ~ 𝒩(0, I)
+        Returns the posterior mean and marginal variances after 0, 1, … iters directions,
+        plus how many directions were actually usable (the Krylov space can run out).
+        """
+        n = A.shape[0]
+        rng = np.random.default_rng(seed)
+        mu = np.zeros(n)
+        var = prior_var.copy()
+        S = []                                            # A-orthonormal directions so far
+        mus, vars_, used = [mu.copy()], [var.copy()], [0]
+        for k in range(iters):
+            if directions == "residual":
+                s = b - A @ mu
+            elif directions == "coordinate":
+                s = np.zeros(n)
+                s[k % n] = 1.0
+            else:
+                s = rng.standard_normal(n)
+            for _ in range(2):                            # A-conjugate, with re-orthogonalisation
+                for u in S:
+                    s = s - (u @ (A @ s)) * u
+            q = float(s @ (A @ s))
+            if np.isfinite(q) and q > 1e-14:              # otherwise the direction is spent
+                s = s / np.sqrt(q)
+                S.append(s)
+                mu = mu + s * (s @ b)                     # one dimension resolved …
+                var = var - s ** 2                        # … and removed from the belief
+            mus.append(mu.copy())
+            vars_.append(np.maximum(var, 0.0))
+            used.append(len(S))
+        return dict(mus=mus, vars=vars_, used=used)
+
+    return (bayescg,)
+
+
+@app.cell
+def _(bayescg, bump_forcing, grid_matrix, np, spla):
+    m_bcg = 10                                            # 10 × 10 tiling, n = 100 unknowns
+    A_bcg = grid_matrix(m_bcg, screening=0.4)
+    b_bcg = bump_forcing(m_bcg)
+    x_bcg = spla.spsolve(A_bcg.tocsc(), b_bcg)
+    n_bcg = m_bcg ** 2
+    pv_bcg = np.diag(np.linalg.inv(A_bcg.toarray()))      # prior marginal variances, diag(A⁻¹)
+    dir_names = ["residual (= CG)", "coordinate", "random"]
+    bcg_runs = {
+        "residual (= CG)": bayescg(A_bcg, pv_bcg, b_bcg, n_bcg, "residual"),
+        "coordinate": bayescg(A_bcg, pv_bcg, b_bcg, n_bcg, "coordinate"),
+        "random": bayescg(A_bcg, pv_bcg, b_bcg, n_bcg, "random"),
+    }
+
+    def a_norm(A, v):
+        return float(np.sqrt(abs(v @ (A @ v))))
+
+    bcg_err = {k: [a_norm(A_bcg, x_bcg - mu) / a_norm(A_bcg, x_bcg) for mu in r["mus"]]
+               for k, r in bcg_runs.items()}
+    return (
+        A_bcg,
+        b_bcg,
+        bcg_err,
+        bcg_runs,
+        dir_names,
+        m_bcg,
+        n_bcg,
+        pv_bcg,
+        x_bcg,
+    )
+
+
+@app.cell
+def _(dir_names, mo, n_bcg):
+    dir_pick = mo.ui.radio(options=dir_names, value=dir_names[0], label="search directions",
+                           inline=True)
+    m_slider = mo.ui.slider(0, n_bcg, step=1, value=8, label="search directions m", full_width=True)
+    mo.vstack([m_slider, dir_pick])
+    return dir_pick, m_slider
+
+
+@app.cell
+def _(bcg_runs, dir_pick, go, m_bcg, m_slider, np, pv_bcg, x_bcg):
+    _r = bcg_runs[dir_pick.value]
+    _m = m_slider.value
+    _mu = _r["mus"][_m].reshape(m_bcg, m_bcg)
+    _sd = np.sqrt(_r["vars"][_m]).reshape(m_bcg, m_bcg)
+
+    _fig = go.Figure()
+    _fig.add_trace(go.Heatmap(z=_mu, colorscale="RdBu", zmid=0, colorbar=dict(x=0.44, len=0.9),
+                              zmin=float(x_bcg.min()), zmax=float(x_bcg.max()),
+                              hovertemplate="μ = %{z:.3f}<extra></extra>"))
+    _fig.add_trace(go.Heatmap(z=_sd, colorscale="Viridis", xaxis="x2", yaxis="y2",
+                              colorbar=dict(x=1.0, len=0.9),
+                              zmin=0.0, zmax=float(np.sqrt(pv_bcg).max()),
+                              hovertemplate="σ = %{z:.3f}<extra></extra>"))
+    _fig.update_layout(
+        template="plotly_white", height=380, margin=dict(l=40, r=20, t=60, b=40),
+        title=f"after m = {_m} directions:  posterior mean μₘ (left), posterior std √diag(Σₘ) (right)",
+        xaxis=dict(domain=[0.0, 0.42], visible=False),
+        yaxis=dict(visible=False, scaleanchor="x", scaleratio=1, autorange="reversed"),
+        xaxis2=dict(domain=[0.56, 0.98], visible=False),
+        yaxis2=dict(visible=False, anchor="x2", scaleanchor="x2", scaleratio=1, autorange="reversed"),
+    )
+    _fig
+    return
+
+
+@app.cell
+def _(
+    PAL,
+    base_layout,
+    bcg_err,
+    bcg_runs,
+    dir_pick,
+    go,
+    m_slider,
+    n_bcg,
+    np,
+    pv_bcg,
+):
+    _r = bcg_runs[dir_pick.value]
+    _sd = np.array([np.sqrt(v).mean() for v in _r["vars"]]) / np.sqrt(pv_bcg).mean()
+    _m = np.arange(n_bcg + 1)
+
+    _fig = go.Figure()
+    _fig.add_trace(go.Scatter(x=_m, y=np.maximum(bcg_err[dir_pick.value], 1e-16), mode="lines",
+                              name="relative A-norm error", line=dict(color=PAL["blue"], width=2)))
+    _fig.add_trace(go.Scatter(x=_m, y=_sd, mode="lines", yaxis="y2",
+                              name="mean posterior std (÷ prior)",
+                              line=dict(color=PAL["orange"], width=2)))
+    _fig.add_vline(x=m_slider.value, line_dash="dot", line_color=PAL["gray"])
+    base_layout(_fig, title="what the mean knows vs. what the belief admits",
+                xlabel="search directions m", ylabel="relative A-norm error", height=330,
+                legend=dict(orientation="h", y=-0.28),
+                yaxis2=dict(title="posterior std ÷ prior std", overlaying="y", side="right",
+                            range=[0, 1.05], showgrid=False))
+    _fig.update_yaxes(type="log")
+    _fig
+    return
+
+
+@app.cell
+def _(
+    A_bcg,
+    b_bcg,
+    bcg_err,
+    bcg_runs,
+    conjugate_gradients,
+    dir_pick,
+    m_slider,
+    mo,
+    np,
+    pv_bcg,
+    x_bcg,
+):
+    _r = bcg_runs[dir_pick.value]
+    _m = m_slider.value
+    _mu, _var = _r["mus"][_m], _r["vars"][_m]
+    _sd = np.sqrt(_var)
+    _extra = ""
+    if dir_pick.value.startswith("residual"):
+        _K = min(_r["used"][-1], 20)
+        _cg = conjugate_gradients(A_bcg, b_bcg, _K)
+        _gap = max(np.max(np.abs(_r["mus"][_i] - _cg[_i])) for _i in range(_K + 1))
+        _extra = (f"\n| max difference between $\\mu_m$ and the CG iterate, first {_K} steps "
+                  f"| **{_gap:.1e}** |")
+    mo.md(
+        f"""
+    | after m = {_m} directions | value |
+    |:--|--:|
+    | directions actually usable | {_r['used'][_m]} of {_m if _m else 0} |
+    | relative error in the $A$-norm | {bcg_err[dir_pick.value][_m]:.2e} |
+    | max error in the mean | {np.max(np.abs(_mu - x_bcg)):.2e} |
+    | mean posterior std, as a fraction of the prior | {_sd.mean() / np.sqrt(pv_bcg).mean():.3f} |
+    | tiles whose truth lies within ±2σ of μₘ | {int(np.sum(np.abs(_mu - x_bcg) <= 2 * _sd))} of {len(x_bcg)} |{_extra}
+    """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.callout(
+        mo.md(
+            r"""
+    **The mean finishes long before the belief does.** With residual directions the posterior mean
+    reproduces conjugate gradients to the last bit — the known BayesCG–CG correspondence — and it is
+    accurate to $10^{-7}$ in $A$-norm after about 20 directions. The posterior standard deviation at that
+    point has barely moved: 100 dimensions, 20 of them resolved, so roughly 80 % of the prior spread is
+    still there. Keep dragging and CG runs out of Krylov space entirely (the "directions actually usable"
+    row stops climbing) while the belief still reports the variance of every direction it never looked in.
+    The credible intervals are not wrong — every tile stays inside $\pm 2\sigma$ — they are wildly
+    conservative, and calibrating them is an active line of work.
+
+    Switch to coordinate or random directions and the opposite happens: the variance falls at the same
+    steady rate as before, all the way to zero at $m = n$, but the mean now needs nearly all $n$
+    directions to get there. The uncertainty is tracking *how much of the space has been probed*, not
+    *how wrong the estimate is*. Section 4.5 meets the mirror image of this — a solver that is
+    over-confident rather than over-cautious.
+
+    Note also what the prior cost: $\Sigma_0 = A^{-1}$ and every $\Sigma_m$ is a dense $n \times n$
+    object, and choosing $s_i$ is a global decision. That is what §4 gets rid of.
+    """
+        ),
+        kind="info",
+    )
     return
 
 
@@ -664,40 +1021,11 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    mo.callout(
-        mo.md(
-            r"""
-    **Do not over-read this.** It is tempting — and this notebook's first draft did exactly that — to call
-    the round-$k$ belief an *error bar on the computation*. It is not. It is the exact posterior of a
-    **different problem**: the truncated $k$-hop computation tree. Nothing in it estimates the distance
-    between $\mu^{(k)}$ and the answer $A^{-1}b$.
-
-    The reason is visible in the update rule itself. The precision recursion
-    $P_{ij} = -A_{ij}^2 / P_{i\setminus j}$ **contains no $b$**: the precisions form a closed system
-    driven by the matrix alone. Change the right-hand side and every variance in this notebook is
-    unchanged to the last bit, while the errors are completely different. So the belief cannot be
-    tracking the error, and the two converge on schedules that have nothing to do with each other.
-
-    That gap — an anytime *belief* that is not an anytime *error estimate* — is, to us, the most
-    interesting open problem in this whole construction, and §5 comes back to it.
-    """
-        ),
-        kind="warn",
-    )
-    return
-
-
-@app.cell
-def _(bump_forcing, gabp, grid_matrix, np, spla):
-    m_grid = 24                       # 24 × 24 lattice, n = 576 unknowns
-    screen_grid = 0.4
-    A_grid = grid_matrix(m_grid, screening=screen_grid)
-    b_grid = bump_forcing(m_grid)
-    x_grid = spla.spsolve(A_grid.tocsc(), b_grid)
+def _(A_grid, b_grid, gabp, np):
+    # Same 24 × 24 test problem as §2; here it is run through the message-passing solver.
     grid_bp = gabp(A_grid, b_grid, iters=400, tol=1e-12, record=True)
     var_grid = np.diag(np.linalg.inv(A_grid.toarray()))     # reference marginals (dense, n = 576)
-    return A_grid, b_grid, grid_bp, m_grid, var_grid, x_grid
+    return grid_bp, var_grid
 
 
 @app.cell
@@ -756,7 +1084,7 @@ def _(mo):
     mo.callout(
         mo.md(
             r"""
-    **What to look for.** At $k=1$ every node reports $b_i/A_{ii}$ — its own equation, nothing else — and a uniformly small standard deviation: maximal over-confidence. As rounds pass, the mean fills in from the sources outward, and the standard-deviation map inflates from the boundary inward, because nodes near the boundary genuinely *are* better determined (Dirichlet conditions pin them) while interior nodes must wait to learn how loosely they are held. Both fields stop changing once the information has travelled a correlation length.
+    **What to look for.** At $k=1$ every node reports $b_i/A_{ii}$ and a uniformly small standard deviation: maximal over-confidence. As rounds pass, the mean fills in from the sources outward, and the standard-deviation map inflates from the boundary inward, because nodes near the boundary genuinely *are* better determined (Dirichlet conditions pin them) while interior nodes must wait to learn how loosely they are held. Both fields stop changing once the information has travelled a correlation length.
     """
         ),
         kind="success",
@@ -769,9 +1097,7 @@ def _(mo):
     mo.md(r"""
     ### 4.6 Loops: exact means, over-confident variances
 
-    On a graph with cycles the same information arrives at a node by several routes and gets double-counted. The remarkable fact (Weiss & Freeman 2001) is that this does **not** spoil the means: *if* GaBP converges, the marginal means are the exact solution $A^{-1}b$, cycles or no cycles. The variances are another matter — the computation tree that BP effectively solves keeps re-entering the same loop, and the walk-sum analysis of Malioutov, Johnson & Willsky (2006) shows BP counts only the self-return walks that revisit the root once. On an attractive model, where all those walks contribute with the same sign, the missing terms are positive, so BP **under-estimates** the variance: the solver is over-confident.
-
-    That is the honest state of the art, and it is exactly the kind of statement the probabilistic-numerics community is equipped to improve on.
+    On a graph with cycles the same information arrives at a node by several routes and gets double-counted. The remarkable fact (Weiss & Freeman 2001) is that this does **not** spoil the means: *if* GaBP converges, the marginal means are the exact solution $A^{-1}b$, cycles or no cycles. The variances are another matter — the computation tree that BP effectively solves keeps re-entering the same loop, and the walk-sum analysis of Malioutov, Johnson & Willsky (2006) shows BP counts only the self-return walks that revisit the root once. On a model where all those walks contribute with the same sign, the missing terms are positive, so BP **under-estimates** the variance: the solver is over-confident.
     """)
     return
 
@@ -814,9 +1140,9 @@ def _(mo):
     1. clamp every precision message to zero, $P_{ij} := 0$;
     2. stop excluding the reverse message — let node $i$ use what $j$ told it when replying to $j$.
 
-    What remains is $\mu_i = A_{ii}^{-1}\bigl(b_i - \sum_{k \neq i} A_{ki}\mu_k\bigr)$: **the Jacobi iteration** (Shental et al., Prop. 16). The classical stationary solver is the message-passing solver with the second moment thrown away and the cycle-avoidance thrown away.
+    What remains is $\mu_i = A_{ii}^{-1}\bigl(b_i - \sum_{k \neq i} A_{ki}\mu_k\bigr)$, i.e. the Jacobi iteration (Shental et al., Prop. 16).
 
-    The classical method is not an alternative to the probabilistic one; it is the probabilistic one, marginalised down to a point estimate. Unlike Jacobi, GaBP carries precisions and excludes the reverse message. It is just *bookkeeping about information*, and it is what buys both the uncertainty estimate and the faster convergence.
+    The classical method is not an alternative to the probabilistic one; it is the probabilistic one, marginalised down to a point estimate. Unlike Jacobi, GaBP carries precisions and excludes the reverse message. It is just bookkeeping about information.
     """)
     return
 
@@ -837,7 +1163,6 @@ def _(A_grid, b_grid, gabp, mo, np, stationary):
     | relative residual after {_K} rounds — Jacobi | {np.linalg.norm(A_grid @ _jac[_K] - b_grid) / _bn:.2e} |
     | relative residual after {_K} rounds — full GaBP | {_full['res'][-1]:.2e} |
 
-    Identical to machine precision — and the two residuals show what the discarded second moment was worth.
     """
     )
     return
@@ -846,12 +1171,12 @@ def _(A_grid, b_grid, gabp, mo, np, stationary):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ### 4.8 Scheduling: nobody has to wait
+    ### 4.8 Scheduling
 
-    * **Synchronous** — every node sends every round, using the previous round's messages. Like Jacobi.
-    * **Asynchronous** — sweep the nodes and use each message the moment it exists. Like Gauss–Seidel.
+    * **Synchronous (flooding)** — every node sends every round, using the previous round's messages.
+    * **Asynchronous (serial)** — sweep the nodes and use each message the moment it exists.
 
-    Neither needs an inner product, a norm, or any other quantity that couples all $n$ unknowns. Convergence is not destroyed by nodes running at different speeds, by stale messages, or by a node dropping out for a while. This is what makes the scheme viable on an unreliable, heterogeneous, or genuinely geographically distributed machine. Compare against the classical methods, remembering that each CG iteration hides two global barriers.
+    Neither needs an inner product, a norm, or any other quantity that couples all $n$ unknowns. Convergence is not destroyed by nodes running at different speeds, by stale messages, or by a node dropping out for a while. This is what makes the scheme viable on an unreliable, heterogeneous, or genuinely geographically distributed machine.
     """)
     return
 
@@ -920,27 +1245,14 @@ def _(PAL, base_layout, curves_chain, curves_grid, go, np, problem_pick):
 
 @app.cell
 def _(mo):
-    mo.callout(
-        mo.md(
-            r"""
-    **Reading the plot.** GaBP sits between the stationary methods and CG in iteration count — clearly better than Jacobi, comparable to or better than Gauss–Seidel — while being *strictly more local than either*: no global norm is ever formed, and the serial variant tolerates arbitrary update order. CG wins on iterations; whether it wins on wall-clock depends entirely on what a global reduction costs you. And on the tree, GaBP terminates *exactly* — in a bounded number of rounds, set by how far information must travel — which no stationary method does.
-    """
-        ),
-        kind="info",
-    )
-    return
-
-
-@app.cell
-def _(mo):
     mo.md(r"""
     ### 4.9 Does it scale?
 
-    Per round, each node sends one two-scalar message per incident edge: the cost is $O(\mathrm{nnz})$ arithmetic and $O(\mathrm{nnz})$ communication, all of it nearest-neighbour, all of it parallel. So the only question that matters is **how the round count grows with $n$** — and that is where the probabilistic reading pays off in intuition.
+    Per round, each node sends one two-scalar message per incident edge: the cost is $O(\mathrm{nnz})$ arithmetic and $O(\mathrm{nnz})$ communication, all of it nearest-neighbour, all of it parallel. So the only question that matters is how the round count grows with $n$.
 
-    The screening parameter $c$ in $(c - \Delta)u = f$ sets the correlation length $\ell \sim 1/\sqrt{c}$ of the Gaussian field $\mathcal{N}(A^{-1}b, A^{-1})$. A node's marginal is determined by the nodes within a few $\ell$ of it; everything beyond is screened off. Information therefore has to travel a *fixed physical distance*, not across the whole domain. So the round count **saturates**: it stops growing with $n$, and the total work is $O(n)$ with perfect parallelism.
+    The parameter $c$ sets the correlation length $\ell \sim 1/\sqrt{c}$ of the Gaussian field $\mathcal{N}(A^{-1}b, A^{-1})$. A node's marginal is determined by the nodes within a few $\ell$ of it; everything beyond is screened off. Information therefore has to travel a *fixed physical distance*, not across the whole domain. So the round count actually saturates. It stops growing with $n$, and the total work is $O(n)$ with perfect parallelism.
 
-    At $c = 0$ the correlation length is the domain size, every node needs to hear from every other, and the round count grows like the diameter. This is not a defect of message passing; it is the same long-range coupling that makes unpreconditioned Jacobi and CG slow. It states what a preconditioner has to do: *shorten the correlation length*.
+    At $c = 0$ the correlation length is the domain size, and every node needs to hear from every other. This is not a defect of message passing; it is the same long-range coupling that makes unpreconditioned Jacobi and CG slow.
     """)
     return
 
@@ -1001,13 +1313,13 @@ def _(mo):
     mo.md(r"""
     ### 4.10 When it fails
 
-    GaBP is not unconditionally convergent, and the sufficient conditions are the familiar ones:
+    GaBP is not unconditionally convergent. The sufficient conditions are:
 
-    * $A$ strictly **diagonally dominant** $\Rightarrow$ convergence to the exact means (Weiss & Freeman 2001);
-    * **walk-summability**, $\rho\bigl(|I - D^{-1}A|\bigr) < 1$ with $D = \operatorname{diag}(A)$, a strictly weaker condition (Malioutov et al. 2006);
-    * a **tree**, in which case it converges exactly regardless of the spectral radius.
+    * **tree** structure on $A$,
+    * Strict diagonal dominance in $A$ (Weiss & Freeman 2001),
+    * **walk-summability**, i.e., $\rho\bigl(|I - D^{-1}A|\bigr) < 1$ for $D = \operatorname{diag}(A)$ (Malioutov et al. 2006).
 
-    In practice the basin is considerably larger than those conditions. But it does have an edge. Below, a lattice with random $\pm w$ couplings (a "frustrated" model, the sort where loops carry conflicting information) sweeps from harmless to divergent. Watch the diagnostics: the walk-summability bound is crossed long before anything goes wrong, and then convergence fails somewhere near the point where the Gaussian stops being a valid distribution at all.
+    In practice, GaBP will often converge outside these conditions as well. But it does have an edge. Below, a lattice with random $\pm w$ couplings (a "frustrated" model, the sort where loops carry conflicting information) sweeps from harmless to divergent. The walk-summability bound is crossed long before anything goes wrong, and then convergence fails somewhere near the point where the Gaussian stops being a valid distribution at all.
     """)
     return
 
@@ -1087,7 +1399,7 @@ def _(mo):
     mo.callout(
         mo.md(
             r"""
-    **Try it.** Push $w$ up from 0.05. The unit diagonal is beaten by the four couplings at $w = 0.25$ and walk-summability goes one step later at $w \approx 0.26$ — the two sufficient conditions fail together, and neither failure costs anything: the solver keeps converging, taking 45 rounds at $w = 0.26$ and 297 at $w = 0.29$. It breaks between $w = 0.29$ and $w = 0.30$, which is essentially where $A$ stops being positive definite ($\lambda_{\min} = +0.007$ at $w = 0.30$). Then turn on damping, $P \leftarrow (1-\alpha)P_{\text{new}} + \alpha P_{\text{old}}$: it buys smoothness in the borderline regime but does **not** rescue the indefinite case — and it should not, because there is no valid Gaussian left to infer. Sharp characterisations of the convergence basin, and principled fixes outside it, remain open (see Johnson et al. 2009, Ruozzi & Tatikonda 2013).
+    Try it. Push $w$ up from 0.05. The unit diagonal is beaten by the four couplings at $w = 0.25$ and walk-summability goes one step later at $w \approx 0.26$. The two sufficient conditions fail together, and neither failure costs anything: the solver keeps converging, taking 45 rounds at $w = 0.26$ and 297 at $w = 0.29$. It breaks between $w = 0.29$ and $w = 0.30$, which is essentially where $A$ stops being positive definite ($\lambda_{\min} = +0.007$ at $w = 0.30$). Then turn on damping, $P \leftarrow (1-\alpha)P_{\text{new}} + \alpha P_{\text{old}}$: it buys smoothness in the borderline regime but does *not* rescue the indefinite case. Sharp characterisations of the convergence basin, and principled fixes outside it, remain open (see Johnson et al. 2009, Ruozzi & Tatikonda 2013).
     """
         ),
         kind="warn",
@@ -1098,36 +1410,10 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 5. Where this goes
+    ## Feedback
 
-    We arrived at a linear solver that is local, asynchronous, communication-light, and reports a per-node uncertainty as a by-product — and whose classical counterpart (Jacobi) is literally itself with the second moment deleted. That combination is the argument of this tutorial: **probabilistic numerics at scale wants message passing, because message passing is what turns a global belief into a distributed one.**
-
-    Possible research directions:
-
-    * **Beyond symmetry.** GaBP as derived needs $A = A^\top$. Shental et al. (§VII) embed a rectangular $S$ into the symmetric system $\bigl(\begin{smallmatrix} I & S^\top \\ S & -\Psi \end{smallmatrix}\bigr)$, whose solution is the ridge/pseudo-inverse estimate $(S^\top S + \Psi)^{-1}S^\top y$ — with $2nk$ messages rather than $n^2$. Fanaskov (2022) instead modifies the messages themselves for non-symmetric $A$, relates the result to LU and block-LU factorisation, and uses GaBP as a **multigrid smoother**, where it is markedly more robust than incomplete-LU or Gauss–Seidel smoothing.
-    * **Beyond linear systems.** Because an interior-point method is a sequence of linear systems (Newton steps on the Hessian), swapping each solve for GaBP gives a **distributed linear-programming solver** (Bickson et al. 2008). The same substitution works anywhere a Newton step is the inner loop.
-    * **Better uncertainty.** Two distinct problems, and this tutorial solves neither. *First*, the means are exact on convergence but the variances are not: generalised BP / the cluster-variation method (the second algorithm in Fanaskov 2022), or the walk-sum corrections of Johnson et al., buy calibration by giving up locality. **What is the cheapest message-passing scheme with honest variances?** *Second*, and more fundamental (§4.5): the belief is a statement about the $k$-hop sub-problem, not about the error, because the precision recursion never sees $b$. An anytime *belief* is not an anytime *error estimate*, and nothing in the classical GaBP literature is trying to make it one. **What would a message that carried error information — rather than only information about $A$ — even look like?** Both are probabilistic-numerics questions, not linear-algebra ones; the second is the one we would most like an answer to.
-    * **Applications where the graph is real.** Power-grid state estimation, sensor-network localisation, SLAM and bundle adjustment (Gaussian BP is the engine of several modern SLAM back-ends), CDMA multiuser detection — in each case the factor graph is not a metaphor for the sparsity pattern; it is the physical layout of the machine. The die of §1 is the limiting case, where the graph is *literally* the silicon; and that this is a good bargain in wall-clock, not just in rhetoric, has been measured. Ortiz et al. (2020) solved a real bundle-adjustment problem by GaBP on the 1216 cores of a single graph processor in under 40 ms, against 1450 ms for a sparse-Cholesky CPU library — the whole margin coming from an algorithm that never needs anything but nearest-neighbour exchange.
-
-    <!-- ### Exercises
-
-    1. **Elimination by hand.** Take a 5-node tree, run `gabp` for one sweep, and check that $P_{i\setminus j}$ equals the pivot $A_{ii} - \sum_{l} A_{li}^2/A_{ll}$ produced by Gaussian elimination from the leaves. (Shental et al., Prop. 14.)
-    2. **Correlation length.** For the screened lattice, measure the round count as a function of $c$ and compare it against $\ell = 1/\sqrt{c}$ measured directly from the decay of $(A^{-1})_{ij}$ with $\|i - j\|$.
-    3. **Preconditioning as re-modelling.** Apply a Jacobi and then an incomplete-Cholesky preconditioner and re-run GaBP on the preconditioned system. Explain the change in round count in terms of correlation length rather than condition number.
-    4. **Anytime calibration.** For the loopy lattice, plot the actual error $|\mu_i^{(k)} - x_{\ast i}|$ against the belief standard deviation $\sqrt{1/P_i^{(k)}}$ at each round $k$. Is the $k$-round belief a usable stopping criterion? Where is it over-confident, and by how much?
-    5. **Asynchrony.** Modify the serial schedule to update a random 30% of nodes per round, or to use messages one round stale. How much does the round count degrade? (This is the experiment that decides whether the method survives on real hardware.)
-    6. **Non-symmetric.** Implement the augmented system of Shental et al. §VII and solve a rectangular least-squares problem by message passing. Compare against `scipy.sparse.linalg.lsqr`. -->
-
-    ### References
-
-    * Shental, O., Bickson, D., Siegel, P. H., Wolf, J. K., & Dolev, D. (2008). *Gaussian belief propagation solver for systems of linear equations*. IEEE ISIT, 1863–1867. Extended: [arXiv:0810.1119](https://arxiv.org/abs/0810.1119).
-    * Bickson, D., Tock, Y., Shental, O., & Dolev, D. (2008). *Polynomial linear programming with Gaussian belief propagation*. Allerton, 895–901.
-    * Fanaskov, V. (2022). *Gaussian belief propagation solvers for nonsymmetric systems of linear equations*. SIAM J. Sci. Comput., 44(2), A77–A102.
-    * Weiss, Y., & Freeman, W. T. (2001). *Correctness of belief propagation in Gaussian graphical models of arbitrary topology*. Neural Computation, 13(10), 2173–2200.
-    * Malioutov, D. M., Johnson, J. K., & Willsky, A. S. (2006). *Walk-sums and belief propagation in Gaussian graphical models*. JMLR, 7, 2031–2064.
-    * Hennig, P., Osborne, M. A., & Kersting, H. P. (2022). *Probabilistic Numerics: Computation as Machine Learning*. Cambridge University Press.
-    * Cockayne, J., Oates, C. J., Ipsen, I. C. F., & Girolami, M. (2019). *A Bayesian conjugate gradient method*. Bayesian Analysis, 14(3), 937–1012.
-    * Ortiz, J., Pupilli, M., Leutenegger, S., & Davison, A. J. (2020). *Bundle adjustment on a graph processor*. CVPR, 2413–2422. [arXiv:2003.03134](https://arxiv.org/abs/2003.03134).
+    Found a bug, a claim that does not hold up, or something we could explain better? Please open an
+    issue at [github.com/biaslab/ProbNum2026-Tutorial](https://github.com/biaslab/ProbNum2026-Tutorial/issues).
     """)
     return
 
